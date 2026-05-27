@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ctypes
+import queue
 import logging
 import sys
 import time
@@ -42,6 +43,24 @@ VK_7 = 0x37
 VK_8 = 0x38
 VK_9 = 0x39
 
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+WM_QUIT = 0x0012
+HC_ACTION = 0
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", ctypes.c_uint32),
+        ("scanCode", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
 
 def get_app_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -68,6 +87,117 @@ def key_pressed(vk_code: int) -> bool:
     return bool(ctypes.windll.user32.GetAsyncKeyState(vk_code) & 0x8000)
 
 
+class GlobalHotkeyListener:
+    """全局热键监听器。
+
+    仅记录键盘事件，不会拦截按键，所以游戏原本热键功能仍然保留。
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue[tuple[str, int]] = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._thread_id: int | None = None
+        self._hook = None
+        self._proc = None
+        self._pressed_keys: set[int] = set()
+        self._logger = logging.getLogger("hotkey_listener")
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread_id is not None:
+            ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        self._thread_id = None
+
+    def clear(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
+
+    def get_event(self, timeout: float = 0.05):
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _create_proc(self):
+        user32 = ctypes.windll.user32
+
+        @ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p)
+        def keyboard_proc(n_code, w_param, l_param):
+            if n_code == HC_ACTION:
+                data = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                vk_code = int(data.vkCode)
+                if w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                    if vk_code not in self._pressed_keys:
+                        self._pressed_keys.add(vk_code)
+                        self._queue.put(("down", vk_code))
+                elif w_param in (WM_KEYUP, WM_SYSKEYUP):
+                    if vk_code in self._pressed_keys:
+                        self._pressed_keys.discard(vk_code)
+                        self._queue.put(("up", vk_code))
+
+            return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
+
+        return keyboard_proc
+
+    def _run(self) -> None:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentThreadId.restype = ctypes.c_ulong
+        kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+        kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+        user32.SetWindowsHookExW.restype = ctypes.c_void_p
+        user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+        user32.UnhookWindowsHookEx.restype = ctypes.c_bool
+        user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        user32.CallNextHookEx.restype = ctypes.c_ssize_t
+        user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p]
+        self._thread_id = kernel32.GetCurrentThreadId()
+        self._proc = self._create_proc()
+        module_handle = kernel32.GetModuleHandleW(None)
+        self._hook = user32.SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            self._proc,
+            module_handle,
+            0,
+        )
+
+        if not self._hook:
+            error_code = ctypes.windll.kernel32.GetLastError()
+            self._logger.error("全局热键监听器启动失败，错误码=%s", error_code)
+            self._thread_id = None
+            return
+
+        msg = ctypes.wintypes.MSG()
+        try:
+            while not self._stop_event.is_set():
+                result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if result == 0 or result == -1:
+                    break
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            if self._hook:
+                user32.UnhookWindowsHookEx(self._hook)
+                self._hook = None
+            self._pressed_keys.clear()
+            self._thread_id = None
+
+
 class ClickerManager:
     """连点器管理类 - 处理热键和用户交互（Interception 版）。"""
 
@@ -78,6 +208,7 @@ class ClickerManager:
         self.target_window = TargetWindowBinding(self.target_process_name)
         self.action_executor = ActionExecutor(self.target_window)
         self.action_manager = ActionScriptManager(get_app_dir() / "data")
+        self.hotkey_listener = GlobalHotkeyListener()
         self.running = True
         self.listening = False  # 标记是否在监听热键
         self.clicker.set_focus_callback(self._ensure_click_target_foreground)
@@ -173,16 +304,24 @@ class ClickerManager:
         print("  F4  - 退出脚本并返回菜单")
 
         paused = False
+        self.hotkey_listener.clear()
         while worker.is_alive():
             try:
-                if key_pressed(VK_F2) and not paused:
+                event = self.hotkey_listener.get_event(timeout=0.05)
+                if not event:
+                    continue
+
+                event_type, vk_code = event
+                if event_type != "down":
+                    continue
+
+                if vk_code == VK_F2 and not paused:
                     pause_event.clear()
                     paused = True
                     self.logger.info("脚本已暂停: %s", script_name)
                     print("⏸ 脚本已暂停")
-                    time.sleep(0.3)
 
-                if key_pressed(VK_F1) and paused:
+                elif vk_code == VK_F1 and paused:
                     self.logger.info("脚本将在 3 秒后继续: %s", script_name)
                     print("\n⏳ 脚本将在 3 秒后继续执行，请切换到游戏窗口...")
                     for countdown in range(3, 0, -1):
@@ -197,17 +336,14 @@ class ClickerManager:
                         pause_event.set()
                         paused = False
                         print("▶ 脚本已继续")
-                    time.sleep(0.3)
 
-                if key_pressed(VK_F4):
+                elif vk_code == VK_F4:
                     stop_event.set()
                     pause_event.set()
                     self.logger.info("脚本会话已终止: %s", script_name)
                     print("■ 脚本已终止，返回菜单")
                     worker.join(timeout=1.0)
                     return
-
-                time.sleep(0.05)
             except Exception as e:
                 self.logger.error("脚本会话异常: %s", e)
                 stop_event.set()
@@ -218,7 +354,6 @@ class ClickerManager:
             return
 
         print("✓ 脚本已执行完成")
-        self.logger.info("脚本执行完成: %s", script_name)
 
     def show_menu(self):
         """显示主菜单。"""
@@ -240,18 +375,6 @@ class ClickerManager:
         print(f"  按压持续时间: {self.clicker.config.hold_duration}ms")
         print(f"  时间抖动范围: {self.clicker.config.jitter_range}ms")
         print(f"  启动时移动鼠标到目标: {getattr(self.clicker.config, 'move_mouse', True)}")
-        print("\n【参数调整】(输入数字选择)")
-        print("  1 - 设置点击中心位置")
-        print("  2 - 设置随机移动半径")
-        print("  3 - 设置点击间隔")
-        print("  4 - 设置按压持续时间")
-        print("  5 - 设置时间抖动范围")
-        print("  6 - 加载配置预设")
-        print("  7 - 管理已保存的配置")
-        print("  8 - 动作脚本管理（创建/执行/删除脚本）")
-        print("  9 - 绑定目标窗口（NRC-Win64-Shipping.exe）")
-        print("  0 - 开始监听热键")
-        print("  m - 切换是否在每次点击前移动鼠标 (默认: 关闭)")
         print("\n")
         print(f"【脚本目标窗口】{self.target_window.describe()}")
         print("\n")
@@ -259,11 +382,24 @@ class ClickerManager:
     def interactive_config(self):
         """交互式配置。"""
         while True:
-            choice = input("请选择操作 [0-9]: ").strip()
+            print("\n【参数调整】(输入数字选择)")
+            print("  1 - 设置点击中心位置")
+            print("  2 - 设置随机移动半径")
+            print("  3 - 设置点击间隔")
+            print("  4 - 设置按压持续时间")
+            print("  5 - 设置时间抖动范围")
+            print("  6 - 加载配置预设")
+            print("  7 - 管理已保存的配置")
+            print("  8 - 动作脚本管理（创建/执行/删除脚本）")
+            print("  9 - 绑定目标窗口（NRC-Win64-Shipping.exe）")
+            print("  0 - 开始监听热键")
+            print("  m - 切换是否在每次点击前移动鼠标")
+            print("  直接回车 - 进入热键监听")
 
-            if choice == "0":
-                self.logger.info("开始监听热键... 请使用热键控制连点器")
-                break
+            choice = input("请选择操作: ").strip()
+            if not choice or choice == "0":
+                return
+
             if choice == "1":
                 try:
                     x = int(input("请输入点击中心X坐标: "))
@@ -309,7 +445,6 @@ class ClickerManager:
             elif choice == "6":
                 self.load_config_menu()
             elif choice.lower() == 'm':
-                # 切换是否移动鼠标
                 cur = getattr(self.clicker.config, 'move_mouse', True)
                 self.clicker.config.move_mouse = not cur
                 ConfigManager.save_config(self.clicker.config, "default")
@@ -507,50 +642,52 @@ class ClickerManager:
         """监听热键。"""
         self.listening = True
         self.logger.info("开始监听热键...")
-        
+
+        self.hotkey_listener.start()
+        self.hotkey_listener.clear()
+
         delete_pressed = False
-        
-        while self.listening:
-            try:
-                # F1: 启动
-                if key_pressed(VK_F1):
-                    self._on_start()
-                    time.sleep(0.3)
-                
-                # F2: 停止
-                if key_pressed(VK_F2):
-                    self._on_stop()
-                    time.sleep(0.3)
-                
-                # F3: 统计
-                if key_pressed(VK_F3):
-                    self._on_stats()
-                    time.sleep(0.3)
-                
-                # F4: 返回菜单
-                if key_pressed(VK_F4):
-                    self._on_exit()
-                    break
-                
-                # Delete 组合: Delete+0..9
-                if key_pressed(VK_DELETE):
-                    if not delete_pressed:
-                        delete_pressed = True
-                        # 检查 0-9
-                        for digit in range(10):
-                            vk = VK_0 + digit
-                            if key_pressed(vk):
-                                self._on_delete_number(digit)
-                                time.sleep(0.3)
-                                break
-                else:
-                    delete_pressed = False
-                
-                time.sleep(0.05)
-            
-            except Exception as e:
-                self.logger.error("热键监听异常: %s", e)
-                time.sleep(0.1)
+
+        try:
+            while self.listening:
+                try:
+                    event = self.hotkey_listener.get_event(timeout=0.05)
+                    if not event:
+                        continue
+
+                    event_type, vk_code = event
+
+                    if vk_code == VK_DELETE:
+                        delete_pressed = event_type == "down"
+                        continue
+
+                    if event_type != "down":
+                        continue
+
+                    if vk_code == VK_F1:
+                        self._on_start()
+                        continue
+
+                    if vk_code == VK_F2:
+                        self._on_stop()
+                        continue
+
+                    if vk_code == VK_F3:
+                        self._on_stats()
+                        continue
+
+                    if vk_code == VK_F4:
+                        self._on_exit()
+                        break
+
+                    if delete_pressed and VK_0 <= vk_code <= VK_9:
+                        self._on_delete_number(vk_code - VK_0)
+
+                except Exception as e:
+                    self.logger.error("热键监听异常: %s", e)
+                    time.sleep(0.1)
+        finally:
+            self.hotkey_listener.stop()
 
     def run_menu_loop(self):
         """主菜单循环。"""
