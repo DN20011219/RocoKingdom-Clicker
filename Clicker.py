@@ -305,51 +305,55 @@ class ClickerManager:
         print("  F4  - 退出脚本并返回菜单")
 
         paused = False
+        self.hotkey_listener.start()
         self.hotkey_listener.clear()
-        while worker.is_alive():
-            try:
-                event = self.hotkey_listener.get_event(timeout=0.05)
-                if not event:
-                    continue
+        try:
+            while worker.is_alive():
+                try:
+                    event = self.hotkey_listener.get_event(timeout=0.05)
+                    if not event:
+                        continue
 
-                event_type, vk_code = event
-                if event_type != "down":
-                    continue
+                    event_type, vk_code = event
+                    if event_type != "down":
+                        continue
 
-                if vk_code == VK_F2 and not paused:
-                    pause_event.clear()
-                    paused = True
-                    self.logger.info("脚本已暂停: %s", script_name)
-                    print("⏸ 脚本已暂停")
+                    if vk_code == VK_F2 and not paused:
+                        pause_event.clear()
+                        paused = True
+                        self.logger.info("脚本已暂停: %s", script_name)
+                        print("⏸ 脚本已暂停")
 
-                elif vk_code == VK_F1 and paused:
-                    self.logger.info("脚本将在 3 秒后继续: %s", script_name)
-                    print("\n⏳ 脚本将在 3 秒后继续执行，请切换到游戏窗口...")
-                    for countdown in range(3, 0, -1):
-                        if stop_event.is_set():
-                            break
-                        print(f"   倒计时: {countdown}...")
-                        time.sleep(1)
-                    if not stop_event.is_set():
-                        if self.target_window.is_bound():
-                            activated = self.target_window.activate()
-                            self.logger.info("继续前激活目标窗口: %s | 结果=%s", self.target_window.describe(), activated)
+                    elif vk_code == VK_F1 and paused:
+                        self.logger.info("脚本将在 3 秒后继续: %s", script_name)
+                        print("\n⏳ 脚本将在 3 秒后继续执行，请切换到游戏窗口...")
+                        for countdown in range(3, 0, -1):
+                            if stop_event.is_set():
+                                break
+                            print(f"   倒计时: {countdown}...")
+                            time.sleep(1)
+                        if not stop_event.is_set():
+                            if self.target_window.is_bound():
+                                activated = self.target_window.activate()
+                                self.logger.info("继续前激活目标窗口: %s | 结果=%s", self.target_window.describe(), activated)
+                            pause_event.set()
+                            paused = False
+                            print("▶ 脚本已继续")
+
+                    elif vk_code == VK_F4:
+                        stop_event.set()
                         pause_event.set()
-                        paused = False
-                        print("▶ 脚本已继续")
-
-                elif vk_code == VK_F4:
+                        self.logger.info("脚本会话已终止: %s", script_name)
+                        print("■ 脚本已终止，返回菜单")
+                        worker.join(timeout=1.0)
+                        return
+                except Exception as e:
+                    self.logger.error("脚本会话异常: %s", e)
                     stop_event.set()
                     pause_event.set()
-                    self.logger.info("脚本会话已终止: %s", script_name)
-                    print("■ 脚本已终止，返回菜单")
-                    worker.join(timeout=1.0)
-                    return
-            except Exception as e:
-                self.logger.error("脚本会话异常: %s", e)
-                stop_event.set()
-                pause_event.set()
-                break
+                    break
+        finally:
+            self.hotkey_listener.stop()
 
         if stop_event.is_set():
             return
