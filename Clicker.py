@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import queue
 import logging
 import sys
@@ -182,7 +183,7 @@ class GlobalHotkeyListener:
             self._thread_id = None
             return
 
-        msg = ctypes.wintypes.MSG()
+        msg = wintypes.MSG()
         try:
             while not self._stop_event.is_set():
                 result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
