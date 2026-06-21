@@ -11,6 +11,7 @@ import queue
 import logging
 import sys
 import time
+import traceback
 from pathlib import Path
 import threading
 import argparse
@@ -25,12 +26,17 @@ from ActionScript import (
     KeyAction,
     WaitAction,
 )
+from InputRecorder import InputRecorder
+from PlaybackEngine import PlaybackEngine
 
 
 VK_F1 = 0x70
 VK_F2 = 0x71
 VK_F3 = 0x72
 VK_F4 = 0x73
+VK_F7 = 0x76   # 开始录制
+VK_F8 = 0x77   # 停止录制（并保存）
+VK_F9 = 0x78   # 取消录制
 VK_DELETE = 0x2E
 VK_0 = 0x30
 VK_1 = 0x31
@@ -266,6 +272,16 @@ class ClickerManager:
         # Toast notification callback (set by GUI)
         self._push_toast = push_toast
 
+        # ---- 录制/回放引擎 ----
+        self._recorder: InputRecorder | None = None
+        self._playback: PlaybackEngine | None = None
+        self._recording_name: str | None = None   # 当前录制脚本名
+        self._recording_session_active: bool = False
+        self._playback_name: str | None = None    # 当前回放脚本名
+
+        # 延迟初始化录制器（需要 clicker.is_ready() 后才能使用）
+        self._init_recorder()
+
         if not self.clicker.is_ready():
             self.logger.warning("Interception 驱动未就绪：%s", self.clicker.init_error)
         self.logger.info("连点器管理器已初始化")
@@ -285,6 +301,272 @@ class ClickerManager:
         except Exception:
             pass
         return False
+
+    # ---- 录制引擎初始化 ----
+
+    def _init_recorder(self):
+        """延迟初始化 InputRecorder（需在 Interception 就绪后调用）。"""
+        if self._recorder is not None:
+            return  # 已有实例
+        try:
+            self._recorder = InputRecorder(logger=self.logger)
+            self._recorder.set_clicker(self.clicker)
+            # 设置 F8/F9 热键回调（在录制线程里检测到热键时触发）
+            self._recorder.on_stop = self._on_recording_hotkey_stop
+            self._recorder.on_cancel = self._on_recording_hotkey_cancel
+            # 设置 overlay 事件回调（把录制事件计数推送到 toast）
+            self._recorder._overlay.on_event = self._on_recording_event
+            self.logger.info("InputRecorder 初始化完成")
+        except Exception as e:
+            self.logger.warning("InputRecorder 初始化失败（驱动未就绪？）：%s\n%s",
+                                e, traceback.format_exc())
+            self._recorder = None
+
+        try:
+            self._playback = PlaybackEngine(self.clicker, self.logger)
+            # 设置回放完成回调：弹 toast 提示用户
+            self._playback.on_complete = self._on_playback_complete
+            self.logger.info("PlaybackEngine 初始化完成")
+        except Exception as e:
+            self.logger.warning("PlaybackEngine 初始化失败：%s\n%s", e, traceback.format_exc())
+            self._playback = None
+
+    def _on_recording_event(self, msg: str):
+        """录制事件回调（由 DebugOverlay 调用）：把消息推送到 toast。"""
+        try:
+            self._toast(msg, duration=0.8)
+        except Exception:
+            pass
+
+    def _on_playback_complete(self, success: bool, stopped: bool):
+        """回放完成回调（在回放线程里被调用）：弹 toast 提示用户。"""
+        try:
+            name = self._playback_name or "录制"
+            if stopped:
+                self._toast(f"⏹ 回放已停止: {name}", duration=3.0)
+            elif success:
+                self._toast(f"✅ 回放完成: {name}", duration=3.0)
+            else:
+                self._toast(f"❌ 回放异常: {name}", duration=3.0)
+        except Exception:
+            pass
+
+    def _on_recording_hotkey_stop(self):
+        """F8 热键回调：停止录制并保存（在录制线程里被调用）。"""
+        self.logger.info("F8 热键：停止录制并保存")
+        # 在新线程里执行保存流程，避免阻塞录制线程
+        threading.Thread(
+            target=self._do_stop_and_save,
+            daemon=True,
+        ).start()
+
+    def _on_recording_hotkey_cancel(self):
+        """F9 热键回调：取消录制（在录制线程里被调用）。"""
+        self.logger.info("F9 热键：取消录制")
+        threading.Thread(
+            target=self._do_cancel_recording,
+            daemon=True,
+        ).start()
+
+    def _do_stop_and_save(self):
+        """实际执行停止+保存（在新线程里跑，带完整异常捕获）。"""
+        try:
+            self.stop_recording_and_save()
+        except Exception as e:
+            self.logger.error("停止录制并保存异常: %s\n%s", e, traceback.format_exc())
+            try:
+                self._toast(f"❌ 保存失败: {e}", duration=5.0)
+            except Exception:
+                pass
+
+    def _do_cancel_recording(self):
+        """实际执行取消录制（在新线程里跑，带完整异常捕获）。"""
+        try:
+            self.cancel_recording()
+        except Exception as e:
+            self.logger.error("取消录制异常: %s\n%s", e, traceback.format_exc())
+            try:
+                self._toast(f"❌ 取消失败: {e}", duration=5.0)
+            except Exception:
+                pass
+
+    # ---- 录制控制 API（供 GUI / 热键调用） ----
+
+    def start_recording(self, script_name: str = "recording") -> bool:
+        """开始录制输入事件。返回是否成功。"""
+        try:
+            self.logger.info("start_recording 被调用: name=%s", script_name)
+
+            if self._recorder is None:
+                self.logger.info("recorder 未初始化，调用 _init_recorder()")
+                self._init_recorder()
+
+            if self._recorder is None:
+                self.logger.error("录制失败：InputRecorder 初始化失败")
+                self._toast("❌ 录制器初始化失败", duration=4.0)
+                return False
+
+            if not self.clicker.is_ready():
+                self.logger.error("录制失败：Interception 驱动未就绪")
+                self._show_driver_warning()
+                return False
+
+            if self._recording_session_active:
+                self.logger.warning("录制已在进行中，忽略重复调用")
+                return False
+
+            # 停止其他脚本/连点器
+            if self.clicker.running:
+                self.logger.info("停止连点器以开始录制")
+                self.clicker.stop()
+            self._stop_active_script_session(wait_timeout=1.0)
+            if self._playback and self._playback.is_playing():
+                self.logger.info("停止回放以开始录制")
+                self._playback.stop()
+
+            self._recording_name = script_name
+            self._recording_session_active = True
+            self.logger.info("调用 recorder.start() …")
+            self._recorder.start()
+            self.logger.info("录制开始：%s", script_name)
+            print(f"\n🎙 录制已开始: {script_name}")
+            print("  移动鼠标、点击、按键都会被记录...")
+            print("  F8 — 停止录制并保存")
+            print("  F9 — 取消录制（不保存）")
+            self._toast(f"🎙 录制开始: {script_name}\nF8 停止保存 / F9 取消", duration=4.0)
+            return True
+        except Exception as e:
+            self.logger.error("start_recording 异常: %s\n%s", e, traceback.format_exc())
+            self._recording_session_active = False
+            self._toast(f"❌ 录制启动失败: {e}", duration=5.0)
+            return False
+
+    def stop_recording_and_save(self, script_name: str | None = None) -> str | None:
+        """停止录制并弹出保存对话框。返回保存的文件路径，失败返回 None。"""
+        try:
+            if not self._recording_session_active or self._recorder is None:
+                self.logger.warning("停止录制：当前未在录制")
+                return None
+
+            name = script_name or self._recording_name or "recording"
+            self.logger.info("停止录制：开始获取事件…")
+            events = self._recorder.stop()
+            self._recording_session_active = False
+            self.logger.info("停止录制：收到 %d 条事件", len(events) if events else 0)
+
+            if not events:
+                self.logger.warning("录制结束但无事件")
+                self._toast("录制结束：无事件（未检测到输入）", duration=3.0)
+                return None
+
+            # 弹出 tkinter 对话框让用户输入脚本名
+            self.logger.info("保存录制：调用 save() …")
+            saved_path = self._recorder.save(events, name)
+            self.logger.info("录制已保存: %s（共 %d 条事件）", saved_path, len(events))
+            self._toast(f"💾 录制已保存: {saved_path.name}\n共 {len(events)} 条事件", duration=4.0)
+            return str(saved_path)
+        except Exception as e:
+            self.logger.error("停止录制并保存异常: %s\n%s", e, traceback.format_exc())
+            self._toast(f"❌ 保存失败: {e}", duration=5.0)
+            return None
+
+    def cancel_recording(self) -> None:
+        """取消当前录制（不保存）。"""
+        try:
+            if not self._recording_session_active or self._recorder is None:
+                self.logger.warning("取消录制：当前未在录制")
+                return
+            self.logger.info("取消录制：调用 recorder.stop() …")
+            self._recorder.stop()
+            self._recording_session_active = False
+            self.logger.info("录制已取消")
+            print("\n❌ 录制已取消（未保存）")
+            self._toast("录制已取消", duration=2.0)
+        except Exception as e:
+            self.logger.error("取消录制异常: %s\n%s", e, traceback.format_exc())
+            self._toast(f"❌ 取消失败: {e}", duration=5.0)
+
+    def is_recording(self) -> bool:
+        """返回当前是否在录制中。"""
+        return self._recording_session_active
+
+    def get_recording_status(self) -> dict:
+        """返回录制相关状态（供 GUI 查询）。"""
+        return {
+            "recording": self._recording_session_active,
+            "recording_name": self._recording_name,
+            "playback_active": bool(self._playback and self._playback.is_playing()),
+        }
+
+    # ---- 回放控制 API ----
+
+    def play_recording(self, filepath: str | Path, speed: float = 1.0) -> bool:
+        """加载并回放录制脚本。返回是否成功启动。
+
+        所有失败路径都会通过 toast 提示用户。
+        """
+        def toast(msg: str, duration: float = 4.0):
+            self._toast(msg, duration)
+            self.logger.info("play_recording: %s", msg)
+
+        if self._playback is None:
+            self._init_recorder()
+
+        if self._playback is None:
+            toast("❌ PlaybackEngine 初始化失败", duration=5.0)
+            return False
+
+        if not self.clicker.is_ready():
+            toast("❌ Interception 驱动未就绪", duration=5.0)
+            self._show_driver_warning()
+            return False
+
+        # 先停止其他会话
+        if self.clicker.running:
+            self.clicker.stop()
+        self._stop_active_script_session(wait_timeout=1.0)
+        if self._playback.is_playing():
+            self._playback.stop()
+            time.sleep(0.2)
+
+        path = Path(filepath)
+        if not path.exists():
+            toast(f"❌ 脚本文件不存在: {filepath}", duration=5.0)
+            return False
+
+        if not self._playback.load(path):
+            toast(f"❌ 加载脚本失败: {path.name}", duration=5.0)
+            return False
+
+        # 兼容性检测（如果方法存在）
+        check_compat = getattr(self._playback, "check_compat", None)
+        if callable(check_compat):
+            try:
+                warnings = check_compat()
+                if warnings:
+                    toast("⚠ 兼容性警告: " + "; ".join(warnings), duration=5.0)
+            except Exception as e:
+                self.logger.warning("check_compat 异常: %s", e)
+
+        self._playback.speed = speed
+        if self._playback.start():
+            meta = self._playback.get_meta()
+            name = meta.get("name", path.stem)
+            self._playback_name = name
+            events_list = getattr(self._playback, "_events", [])
+            n_events = len(events_list)
+            toast(f"▶ 回放启动: {name}（{n_events} 条事件，{speed}x）", duration=3.0)
+            return True
+
+        toast("❌ 回放启动失败（start() 返回 False）", duration=5.0)
+        return False
+
+    def stop_playback(self) -> None:
+        """立即停止回放。"""
+        if self._playback and self._playback.is_playing():
+            self._playback.stop()
+            print("\n⏹ 回放已停止")
+            self._toast("回放已停止", duration=2.0)
 
     def _toast(self, text: str, duration: float = 3.0):
         """Show a floating toast notification (thread-safe, no-op if no GUI)."""
@@ -527,6 +809,9 @@ class ClickerManager:
         print("  F1  - 启动连点器")
         print("  F2  - 停止连点器")
         print("  F3  - 显示统计信息")
+        print("  F7  - 开始录制输入（鼠标移动+点击+键盘）")
+        print("  F8  - 停止录制并保存")
+        print("  F9  - 取消录制（不保存）")
         print("\n【默认参数】")
         print(f"  点击中心位置: ({self.clicker.config.center_x}, {self.clicker.config.center_y})")
         print(f"  随机移动半径: {self.clicker.config.radius}px")
@@ -723,11 +1008,39 @@ class ClickerManager:
                         continue
 
                     if vk_code == VK_F2:
-                        self._on_stop()
+                        # F2: 优先暂停/恢复回放；否则停止连点器/脚本
+                        if self._playback and self._playback.is_playing():
+                            result = self._playback.toggle_pause()
+                            if result == "paused":
+                                self._toast("⏸ 回放已暂停（F2 恢复）", duration=2.0)
+                            elif result == "resumed":
+                                self._toast("▶ 回放已恢复", duration=2.0)
+                        else:
+                            self._on_stop()
                         continue
 
                     if vk_code == VK_F3:
                         self._on_stats()
+                        continue
+
+                    if vk_code == VK_F7:
+                        # F7: 开始录制
+                        if not self._recording_session_active:
+                            self.start_recording()
+                        else:
+                            self._toast("已在录制中", duration=1.5)
+                        continue
+
+                    if vk_code == VK_F8:
+                        # F8: 停止录制并保存
+                        if self._recording_session_active:
+                            self.stop_recording_and_save()
+                        continue
+
+                    if vk_code == VK_F9:
+                        # F9: 取消录制
+                        if self._recording_session_active:
+                            self.cancel_recording()
                         continue
 
                     # F4 与 Delete+数字 快捷键已移除；所有脚本管理请使用 GUI 控件或命令行接口。

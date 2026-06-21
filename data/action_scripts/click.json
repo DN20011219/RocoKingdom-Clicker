@@ -13,13 +13,13 @@
           "y": 500,
           "x_jitter_px": 4,
           "y_jitter_px": 4,
-          "hold_ms": 300,
-          "hold_jitter_ms": 120
+          "hold_ms": 250,
+          "hold_jitter_ms": 80
         },
         {
           "type": "wait",
-          "duration_ms": 120,
-          "duration_jitter_ms": 80
+          "duration_ms": 100,
+          "duration_jitter_ms": 50
         }
       ]
     }

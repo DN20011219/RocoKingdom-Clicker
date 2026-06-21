@@ -766,10 +766,11 @@ class ActionScriptManager:
         return None
     
     def save_script(self, script_name: str, actions: List[Any]) -> bool:
-        """保存脚本"""
+        """保存动作脚本（带统一 meta 头，便于与录制脚本统一管理）。"""
         path = self.scripts_dir / f"{script_name}.json"
         try:
             data = {
+                "meta": {"type": "action", "version": 1, "name": script_name},
                 "name": script_name,
                 "actions": [asdict(a) for a in actions]
             }
@@ -780,7 +781,20 @@ class ActionScriptManager:
         except Exception as e:
             self.logger.error("保存脚本失败: %s", e)
             return False
-    
+
     def list_scripts(self) -> List[str]:
-        """列出所有脚本"""
-        return [f.stem for f in self.scripts_dir.glob("*.json")]
+        """列出所有动作脚本（排除录制脚本）。"""
+        result = []
+        for f in self.scripts_dir.glob("*.json"):
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                    meta_type = data.get("meta", {}).get("type")
+                    # 包含：显式 type="action"，或旧文件（无 meta 字段，type 为 None）
+                    # 排除：type="recorded"
+                    if meta_type in ("action", None):
+                        result.append(f.stem)
+            except Exception:
+                # 格式错误，视作 action 脚本
+                result.append(f.stem)
+        return result

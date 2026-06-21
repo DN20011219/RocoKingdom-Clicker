@@ -172,16 +172,75 @@ class InterceptionCore:
 
             self._lib = lib
 
-            # 绑定函数
-            self._lib.interception_create_context.restype = ctypes.c_void_p
-            self._lib.interception_destroy_context.argtypes = [ctypes.c_void_p]
-            self._lib.interception_send.argtypes = [
-                ctypes.c_void_p,  # context
-                ctypes.c_int,     # device
-                ctypes.POINTER(InterceptionMouseStroke),  # stroke
-                ctypes.c_uint,    # nstroke
+            # --- 谓词函数类型（供 interception_set_filter 使用） ---
+            # signature: int (*InterceptionPredicate)(InterceptionDevice device)
+            InterceptionPredicate = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)
+
+            # --- 绑定所有函数的 argtypes / restype（匹配 interception.h） ---
+            lib.interception_create_context.restype = ctypes.c_void_p
+
+            lib.interception_destroy_context.argtypes = [ctypes.c_void_p]
+            lib.interception_destroy_context.restype = None
+
+            lib.interception_set_filter.argtypes = [
+                ctypes.c_void_p,   # context
+                InterceptionPredicate,  # predicate (function pointer)
+                ctypes.c_ushort,   # filter
             ]
-            self._lib.interception_send.restype = ctypes.c_int
+            lib.interception_set_filter.restype = None
+
+            lib.interception_get_filter.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.interception_get_filter.restype = ctypes.c_ushort
+
+            lib.interception_wait.argtypes = [ctypes.c_void_p]
+            lib.interception_wait.restype = ctypes.c_int
+
+            lib.interception_wait_with_timeout.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            lib.interception_wait_with_timeout.restype = ctypes.c_int
+
+            # send / receive：InterceptionStroke 就是 sizeof(InterceptionMouseStroke) 的 char 缓冲
+            lib.interception_send.argtypes = [
+                ctypes.c_void_p, ctypes.c_int,
+                ctypes.POINTER(InterceptionMouseStroke), ctypes.c_uint,
+            ]
+            lib.interception_send.restype = ctypes.c_int
+
+            lib.interception_receive.argtypes = [
+                ctypes.c_void_p, ctypes.c_int,
+                ctypes.POINTER(InterceptionMouseStroke), ctypes.c_uint,
+            ]
+            lib.interception_receive.restype = ctypes.c_int
+
+            lib.interception_is_keyboard.argtypes = [ctypes.c_int]
+            lib.interception_is_keyboard.restype = ctypes.c_int
+
+            lib.interception_is_mouse.argtypes = [ctypes.c_int]
+            lib.interception_is_mouse.restype = ctypes.c_int
+
+            lib.interception_is_invalid.argtypes = [ctypes.c_int]
+            lib.interception_is_invalid.restype = ctypes.c_int
+
+            # --- Interception 过滤器常量（来自 interception.h 的 enum 值） ---
+            # 这些是 enum 整数，不是 DLL 导出符号
+            lib.INTERCEPTION_FILTER_KEY_ALL = 0xFFFF
+            lib.INTERCEPTION_FILTER_KEY_DOWN = 0x01
+            lib.INTERCEPTION_FILTER_KEY_UP = 0x02
+            lib.INTERCEPTION_FILTER_MOUSE_ALL = 0xFFFF
+            lib.INTERCEPTION_FILTER_MOUSE_LEFT_DOWN = 0x001
+            lib.INTERCEPTION_FILTER_MOUSE_LEFT_UP = 0x002
+            lib.INTERCEPTION_FILTER_MOUSE_RIGHT_DOWN = 0x004
+            lib.INTERCEPTION_FILTER_MOUSE_RIGHT_UP = 0x008
+            lib.INTERCEPTION_FILTER_MOUSE_MIDDLE_DOWN = 0x010
+            lib.INTERCEPTION_FILTER_MOUSE_MIDDLE_UP = 0x020
+            lib.INTERCEPTION_FILTER_MOUSE_MOVE = 0x1000
+
+            # --- 把谓词包装函数也挂到 lib 上，方便调用方使用 ---
+            lib._interception_predicate_type = InterceptionPredicate
+            try:
+                lib._is_keyboard_pred = InterceptionPredicate(lib.interception_is_keyboard)
+                lib._is_mouse_pred = InterceptionPredicate(lib.interception_is_mouse)
+            except Exception:
+                pass
 
             # 创建上下文（驱动未安装/未重启时，这里通常返回 NULL 或直接失败）
             try:
