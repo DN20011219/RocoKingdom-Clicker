@@ -17,7 +17,7 @@ import threading
 import argparse
 
 from InterceptionCore import InterceptionCore
-from ConfigManager import ConfigManager
+from ConfigManager import ConfigManager, FKEY_VK, FKEY_SCANCODE, DEFAULT_HOTKEYS
 from ActionScript import (
     ActionScriptManager,
     ActionExecutor,
@@ -34,9 +34,9 @@ VK_F1 = 0x70
 VK_F2 = 0x71
 VK_F3 = 0x72
 VK_F4 = 0x73
-VK_F7 = 0x76   # 开始录制
-VK_F8 = 0x77   # 停止录制（并保存）
-VK_F9 = 0x78   # 取消录制
+VK_F7 = 0x76   # 开始录制（默认，可自定义）
+VK_F8 = 0x77   # 停止录制（默认，可自定义）
+VK_F9 = 0x78   # 取消录制（默认，可自定义）
 VK_DELETE = 0x2E
 VK_0 = 0x30
 VK_1 = 0x31
@@ -279,8 +279,20 @@ class ClickerManager:
         self._recording_session_active: bool = False
         self._playback_name: str | None = None    # 当前回放脚本名
 
+        # ---- 热键配置 ----
+        self._hotkeys: dict[str, str] = ConfigManager.load_hotkeys()
+        self._hotkey_vk: dict[str, int] = {
+            k: FKEY_VK[v] for k, v in self._hotkeys.items()
+        }
+
         # 延迟初始化录制器（需要 clicker.is_ready() 后才能使用）
         self._init_recorder()
+        # 应用热键配置到录制器
+        self._apply_hotkeys_to_recorder()
+
+        # 启动全局热键监听（GUI 和 CLI 模式通用）
+        self._hotkey_dispatch_thread: threading.Thread | None = None
+        self._start_hotkey_dispatch()
 
         if not self.clicker.is_ready():
             self.logger.warning("Interception 驱动未就绪：%s", self.clicker.init_error)
@@ -311,11 +323,14 @@ class ClickerManager:
         try:
             self._recorder = InputRecorder(logger=self.logger)
             self._recorder.set_clicker(self.clicker)
-            # 设置 F8/F9 热键回调（在录制线程里检测到热键时触发）
+            # 设置停止/取消热键回调（在录制线程里检测到热键时触发）
             self._recorder.on_stop = self._on_recording_hotkey_stop
             self._recorder.on_cancel = self._on_recording_hotkey_cancel
             # 设置 overlay 事件回调（把录制事件计数推送到 toast）
             self._recorder._overlay.on_event = self._on_recording_event
+            # 应用当前热键配置到录制器
+            if hasattr(self, '_hotkeys'):
+                self._apply_hotkeys_to_recorder()
             self.logger.info("InputRecorder 初始化完成")
         except Exception as e:
             self.logger.warning("InputRecorder 初始化失败（驱动未就绪？）：%s\n%s",
@@ -330,6 +345,204 @@ class ClickerManager:
         except Exception as e:
             self.logger.warning("PlaybackEngine 初始化失败：%s\n%s", e, traceback.format_exc())
             self._playback = None
+
+    # ---- 热键配置与全局监听 ----
+
+    def _apply_hotkeys_to_recorder(self):
+        """把当前热键配置应用到 InputRecorder。"""
+        if self._recorder is None:
+            return
+        try:
+            ok = self._recorder.set_hotkeys(
+                start=self._hotkeys["start_recording"],
+                stop=self._hotkeys["stop_recording"],
+                cancel=self._hotkeys["cancel_recording"],
+            )
+            if ok:
+                self.logger.info("已应用热键配置到 InputRecorder: %s", self._hotkeys)
+            else:
+                self.logger.warning("应用热键配置到 InputRecorder 失败：录制热键冲突")
+        except Exception as e:
+            self.logger.warning("应用热键配置到 InputRecorder 失败: %s", e)
+
+    def _start_hotkey_dispatch(self):
+        """启动全局热键监听线程（GUI 和 CLI 模式通用）。"""
+        if self._hotkey_dispatch_thread and self._hotkey_dispatch_thread.is_alive():
+            return
+        self.hotkey_listener.start()
+        self._hotkey_dispatch_thread = threading.Thread(
+            target=self._hotkey_dispatch_loop, daemon=True
+        )
+        self._hotkey_dispatch_thread.start()
+        self.logger.info("全局热键监听已启动")
+
+    def _hotkey_dispatch_loop(self):
+        """全局热键事件分发循环（后台线程）。"""
+        while True:
+            try:
+                event = self.hotkey_listener.get_event(timeout=0.1)
+                if not event:
+                    continue
+                event_type, vk_code = event
+                if event_type != "down":
+                    continue
+                self._dispatch_hotkey(vk_code)
+            except Exception as e:
+                self.logger.error("热键分发循环异常: %s", e)
+                time.sleep(0.1)
+
+    def _dispatch_hotkey(self, vk_code: int):
+        """根据虚拟键码分发热键事件到对应处理函数。"""
+        try:
+            if vk_code == self._hotkey_vk["pause_resume"]:
+                self._on_pause_resume_hotkey()
+            elif vk_code == self._hotkey_vk["start_recording"]:
+                if not self._recording_session_active:
+                    self.start_recording()
+                else:
+                    self._toast("已在录制中", duration=1.5)
+            elif vk_code == self._hotkey_vk["stop_recording"]:
+                if self._recording_session_active:
+                    self.stop_recording_and_save()
+            elif vk_code == self._hotkey_vk["cancel_recording"]:
+                if self._recording_session_active:
+                    self.cancel_recording()
+        except Exception as e:
+            self.logger.error("热键处理异常: %s\n%s", e, traceback.format_exc())
+
+    def _on_pause_resume_hotkey(self):
+        """处理暂停/继续热键：优先回放，其次脚本。"""
+        # 回放优先
+        if self._playback and self._playback.is_playing():
+            result = self._playback.toggle_pause()
+            if result == "paused":
+                self._toast("⏸ 回放已暂停", duration=2.0)
+            elif result == "resumed":
+                self._toast("▶ 回放已恢复", duration=2.0)
+            return
+        # 脚本其次
+        if self.script_running:
+            if self.script_paused:
+                self.resume_script()
+            else:
+                self.pause_script()
+            return
+        # 连点器最后（CLI 模式 F2 停止连点器）
+        if self.clicker.running:
+            self._on_stop()
+
+    # ---- 脚本暂停/继续/停止 API（供 GUI 按钮和热键调用） ----
+
+    def pause_script(self) -> bool:
+        """暂停当前正在运行的脚本。"""
+        if not self.script_running or self.script_paused:
+            return False
+        with self._script_session_lock:
+            if self._script_session_pause_event:
+                self._script_session_pause_event.clear()
+        self.script_paused = True
+        self.logger.info("脚本已暂停: %s", self.current_script_name)
+        self._toast("⏸ 脚本已暂停", duration=2.0)
+        return True
+
+    def resume_script(self) -> bool:
+        """恢复暂停的脚本（3 秒倒计时后继续）。"""
+        if not self.script_running or not self.script_paused:
+            return False
+
+        def _do_resume():
+            try:
+                self.logger.info("脚本将在 3 秒后继续: %s", self.current_script_name)
+                self._toast("⏳ 脚本即将继续", duration=3.5)
+                self.countdown_end = time.time() + 3
+                self.countdown_label = "脚本即将继续"
+                for i in range(3, 0, -1):
+                    if self._script_session_stop_event and self._script_session_stop_event.is_set():
+                        break
+                    time.sleep(1)
+                self.countdown_end = None
+                self.countdown_label = None
+                if self._script_session_stop_event and not self._script_session_stop_event.is_set():
+                    with self._script_session_lock:
+                        if self._script_session_pause_event:
+                            self._script_session_pause_event.set()
+                    self.script_paused = False
+                    self._toast("▶ 脚本已继续", duration=2.0)
+            except Exception as e:
+                self.logger.error("恢复脚本异常: %s\n%s", e, traceback.format_exc())
+
+        threading.Thread(target=_do_resume, daemon=True).start()
+        return True
+
+    def stop_script(self) -> bool:
+        """停止当前正在运行的脚本（直接终止，不保留进度）。"""
+        if not self.script_running:
+            return False
+        self.logger.info("停止脚本: %s", self.current_script_name)
+        self._stop_active_script_session(wait_timeout=2.0)
+        self._toast("⏹ 脚本已停止", duration=2.0)
+        return True
+
+    # ---- 回放暂停/继续 API（供 GUI 按钮调用） ----
+
+    def pause_playback(self) -> bool:
+        """暂停回放。"""
+        if self._playback and self._playback.is_playing() and not self._playback.is_paused():
+            if self._playback.pause():
+                self._toast("⏸ 回放已暂停", duration=2.0)
+                return True
+        return False
+
+    def resume_playback(self) -> bool:
+        """恢复回放。"""
+        if self._playback and self._playback.is_paused():
+            if self._playback.resume():
+                self._toast("▶ 回放已恢复", duration=2.0)
+                return True
+        return False
+
+    # ---- 热键配置 API ----
+
+    def get_hotkeys(self) -> dict:
+        """返回当前热键配置。"""
+        return dict(self._hotkeys)
+
+    def set_hotkeys(self, hotkeys: dict) -> bool:
+        """更新热键配置并保存。返回是否成功。
+
+        Args:
+            hotkeys: {key_name: fkey_str} 字典，例如 {"pause_resume": "F3"}
+        """
+        try:
+            # 验证：所有键必须是已知的，值必须是合法 F-key
+            for key, val in hotkeys.items():
+                if key not in DEFAULT_HOTKEYS:
+                    self.logger.warning("未知热键名: %s", key)
+                    return False
+                if val not in FKEY_VK:
+                    self.logger.warning("非法 F-key: %s", val)
+                    return False
+
+            # 检查是否有重复按键（不同功能不能使用同一个键）
+            new_hotkeys = dict(self._hotkeys)
+            new_hotkeys.update(hotkeys)
+            used_keys = list(new_hotkeys.values())
+            if len(used_keys) != len(set(used_keys)):
+                # 找出冲突的按键，给出更具体的提示
+                conflicts = [k for k in set(used_keys) if used_keys.count(k) > 1]
+                self._toast(f"❌ 按键冲突：{', '.join(conflicts)} 被多个功能使用", duration=3.0)
+                return False
+
+            self._hotkeys = new_hotkeys
+            self._hotkey_vk = {k: FKEY_VK[v] for k, v in self._hotkeys.items()}
+            ConfigManager.save_hotkeys(self._hotkeys)
+            self._apply_hotkeys_to_recorder()
+            self.logger.info("热键配置已更新: %s", self._hotkeys)
+            self._toast("✓ 热键配置已保存", duration=2.0)
+            return True
+        except Exception as e:
+            self.logger.error("设置热键配置异常: %s\n%s", e, traceback.format_exc())
+            return False
 
     def _on_recording_event(self, msg: str):
         """录制事件回调（由 DebugOverlay 调用）：把消息推送到 toast。"""
@@ -352,8 +565,8 @@ class ClickerManager:
             pass
 
     def _on_recording_hotkey_stop(self):
-        """F8 热键回调：停止录制并保存（在录制线程里被调用）。"""
-        self.logger.info("F8 热键：停止录制并保存")
+        """停止录制热键回调（在录制线程里被调用）。"""
+        self.logger.info("停止录制热键：停止录制并保存")
         # 在新线程里执行保存流程，避免阻塞录制线程
         threading.Thread(
             target=self._do_stop_and_save,
@@ -361,8 +574,8 @@ class ClickerManager:
         ).start()
 
     def _on_recording_hotkey_cancel(self):
-        """F9 热键回调：取消录制（在录制线程里被调用）。"""
-        self.logger.info("F9 热键：取消录制")
+        """取消录制热键回调（在录制线程里被调用）。"""
+        self.logger.info("取消录制热键：取消录制")
         threading.Thread(
             target=self._do_cancel_recording,
             daemon=True,
@@ -429,11 +642,13 @@ class ClickerManager:
             self.logger.info("调用 recorder.start() …")
             self._recorder.start()
             self.logger.info("录制开始：%s", script_name)
+            stop_key = self._hotkeys.get("stop_recording", "F8")
+            cancel_key = self._hotkeys.get("cancel_recording", "F9")
             print(f"\n🎙 录制已开始: {script_name}")
             print("  移动鼠标、点击、按键都会被记录...")
-            print("  F8 — 停止录制并保存")
-            print("  F9 — 取消录制（不保存）")
-            self._toast(f"🎙 录制开始: {script_name}\nF8 停止保存 / F9 取消", duration=4.0)
+            print(f"  {stop_key} — 停止录制并保存")
+            print(f"  {cancel_key} — 取消录制（不保存）")
+            self._toast(f"🎙 录制开始: {script_name}\n{stop_key} 停止保存 / {cancel_key} 取消", duration=4.0)
             return True
         except Exception as e:
             self.logger.error("start_recording 异常: %s\n%s", e, traceback.format_exc())
@@ -685,7 +900,10 @@ class ClickerManager:
         return True
 
     def _run_script_session(self, script_name: str, actions) -> None:
-        """以和连点器类似的方式运行动作脚本。"""
+        """以和连点器类似的方式运行动作脚本。
+
+        热键（暂停/继续/停止）由全局热键分发线程处理，这里只负责启动 worker 并等待完成。
+        """
         if not self.clicker.is_ready():
             self._show_driver_warning()
             return
@@ -731,66 +949,21 @@ class ClickerManager:
         self.script_paused = False
         worker.start()
 
-        print("\n【脚本热键】")
-        print("  F1  - 继续脚本（暂停后使用，继续前再次等待 3 秒）")
-        print("  F2  - 暂停脚本")
+        pause_key = self._hotkeys.get("pause_resume", "F2")
+        print(f"\n【脚本热键】{pause_key} - 暂停/继续脚本")
 
-        paused = False
-        self.hotkey_listener.start()
-        self.hotkey_listener.clear()
-        try:
-            while worker.is_alive():
-                try:
-                    event = self.hotkey_listener.get_event(timeout=0.05)
-                    if not event:
-                        continue
+        # 等待 worker 完成（热键由全局分发线程处理）
+        worker.join()
 
-                    event_type, vk_code = event
-                    if event_type != "down":
-                        continue
-
-                    if vk_code == VK_F2 and not paused:
-                        pause_event.clear()
-                        paused = True
-                        # 标记为暂停，供 GUI 查询
-                        self.script_paused = True
-                        self.logger.info("脚本已暂停: %s", script_name)
-                        print("⏸ 脚本已暂停")
-                        self._toast("⏸ 脚本已暂停", duration=2.0)
-
-                    elif vk_code == VK_F1 and paused:
-                        self.logger.info("脚本将在 3 秒后继续: %s", script_name)
-                        print("\n⏳ 脚本将在 3 秒后继续执行，请切换到游戏窗口...")
-                        self._toast("⏳ 脚本即将继续", duration=3.5)
-                        for countdown in range(3, 0, -1):
-                            if stop_event.is_set():
-                                break
-                            print(f"   倒计时: {countdown}...")
-                            time.sleep(1)
-                        if not stop_event.is_set():
-                            pause_event.set()
-                            paused = False
-                            # 清除暂停标记
-                            self.script_paused = False
-                            print("▶ 脚本已继续")
-
-                    # F4 已移除：不再通过 F4 退出脚本会话，使用 GUI 按钮或程序逻辑退出
-                except Exception as e:
-                    self.logger.error("脚本会话异常: %s", e)
-                    stop_event.set()
-                    pause_event.set()
-                    break
-        finally:
-            self.hotkey_listener.stop()
-            # 清理脚本会话状态
-            with self._script_session_lock:
-                if self._script_session_thread is worker:
-                    self._script_session_thread = None
-                    self._script_session_stop_event = None
-                    self._script_session_pause_event = None
-                    self.script_running = False
-                    self.script_paused = False
-                    self.current_script_name = None
+        # 清理脚本会话状态
+        with self._script_session_lock:
+            if self._script_session_thread is worker:
+                self._script_session_thread = None
+                self._script_session_stop_event = None
+                self._script_session_pause_event = None
+                self.script_running = False
+                self.script_paused = False
+                self.current_script_name = None
 
         if stop_event.is_set():
             return
@@ -805,13 +978,11 @@ class ClickerManager:
         print("║           ROCOKINGDOM 连点器            ║")
         print("║   基于 Interception 驱动的高效点击工具   ║")
         print("╚════════════════════════════════════════╝")
-        print("\n【热键控制】")
-        print("  F1  - 启动连点器")
-        print("  F2  - 停止连点器")
-        print("  F3  - 显示统计信息")
-        print("  F7  - 开始录制输入（鼠标移动+点击+键盘）")
-        print("  F8  - 停止录制并保存")
-        print("  F9  - 取消录制（不保存）")
+        print("\n【热键控制】（可在 GUI 中自定义）")
+        print(f"  {self._hotkeys['pause_resume']:4s}  - 暂停/继续 脚本/回放")
+        print(f"  {self._hotkeys['start_recording']:4s}  - 开始录制输入")
+        print(f"  {self._hotkeys['stop_recording']:4s}  - 停止录制并保存")
+        print(f"  {self._hotkeys['cancel_recording']:4s}  - 取消录制（不保存）")
         print("\n【默认参数】")
         print(f"  点击中心位置: ({self.clicker.config.center_x}, {self.clicker.config.center_y})")
         print(f"  随机移动半径: {self.clicker.config.radius}px")
@@ -985,71 +1156,16 @@ class ClickerManager:
     # Delete + 0..9 快捷键处理已移除（GUI 操作替代）
 
     def listen_hotkeys(self):
-        """监听热键。"""
+        """CLI 模式：保持程序运行（热键由全局分发线程处理）。"""
         self.listening = True
-        self.logger.info("开始监听热键...")
-
-        self.hotkey_listener.start()
-        self.hotkey_listener.clear()
+        self.logger.info("开始监听热键（全局分发线程已启动）...")
+        print("\n监听热键中... 按 Ctrl+C 退出。")
         try:
             while self.listening:
-                try:
-                    event = self.hotkey_listener.get_event(timeout=0.05)
-                    if not event:
-                        continue
-
-                    event_type, vk_code = event
-
-                    if event_type != "down":
-                        continue
-
-                    if vk_code == VK_F1:
-                        self._on_start()
-                        continue
-
-                    if vk_code == VK_F2:
-                        # F2: 优先暂停/恢复回放；否则停止连点器/脚本
-                        if self._playback and self._playback.is_playing():
-                            result = self._playback.toggle_pause()
-                            if result == "paused":
-                                self._toast("⏸ 回放已暂停（F2 恢复）", duration=2.0)
-                            elif result == "resumed":
-                                self._toast("▶ 回放已恢复", duration=2.0)
-                        else:
-                            self._on_stop()
-                        continue
-
-                    if vk_code == VK_F3:
-                        self._on_stats()
-                        continue
-
-                    if vk_code == VK_F7:
-                        # F7: 开始录制
-                        if not self._recording_session_active:
-                            self.start_recording()
-                        else:
-                            self._toast("已在录制中", duration=1.5)
-                        continue
-
-                    if vk_code == VK_F8:
-                        # F8: 停止录制并保存
-                        if self._recording_session_active:
-                            self.stop_recording_and_save()
-                        continue
-
-                    if vk_code == VK_F9:
-                        # F9: 取消录制
-                        if self._recording_session_active:
-                            self.cancel_recording()
-                        continue
-
-                    # F4 与 Delete+数字 快捷键已移除；所有脚本管理请使用 GUI 控件或命令行接口。
-
-                except Exception as e:
-                    self.logger.error("热键监听异常: %s", e)
-                    time.sleep(0.1)
-        finally:
-            self.hotkey_listener.stop()
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            self.logger.info("收到中断信号")
+            self.listening = False
 
     def run_menu_loop(self):
         """主菜单循环。"""

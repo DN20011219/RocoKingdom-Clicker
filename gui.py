@@ -146,6 +146,78 @@ class Api:
         self.manager.stop_playback()
         return True
 
+    # ---- 暂停/继续/停止 API（脚本和回放通用） ----
+
+    def pause_current(self):
+        """暂停当前正在运行的脚本或回放。"""
+        def worker():
+            try:
+                m = self.manager
+                if m.script_running and not m.script_paused:
+                    m.pause_script()
+                elif m._playback and m._playback.is_playing() and not m._playback.is_paused():
+                    m.pause_playback()
+            except Exception as e:
+                try:
+                    from webview import push_toast
+                    push_toast(f"❌ 暂停失败: {e}", duration=3.0)
+                except Exception:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def resume_current(self):
+        """继续当前暂停的脚本或回放。"""
+        def worker():
+            try:
+                m = self.manager
+                if m.script_running and m.script_paused:
+                    m.resume_script()
+                elif m._playback and m._playback.is_paused():
+                    m.resume_playback()
+            except Exception as e:
+                try:
+                    from webview import push_toast
+                    push_toast(f"❌ 继续失败: {e}", duration=3.0)
+                except Exception:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def stop_current(self):
+        """停止当前正在运行的脚本或回放。"""
+        def worker():
+            try:
+                m = self.manager
+                if m.script_running:
+                    m.stop_script()
+                elif m._playback and m._playback.is_playing():
+                    m.stop_playback()
+            except Exception as e:
+                try:
+                    from webview import push_toast
+                    push_toast(f"❌ 停止失败: {e}", duration=3.0)
+                except Exception:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    # ---- 热键配置 API ----
+
+    def get_hotkeys(self):
+        """返回当前热键配置。"""
+        try:
+            return self.manager.get_hotkeys()
+        except Exception:
+            return {}
+
+    def set_hotkeys(self, hotkeys):
+        """更新热键配置。hotkeys 是 {key_name: fkey_str} 字典。"""
+        try:
+            return self.manager.set_hotkeys(hotkeys)
+        except Exception as e:
+            return False
+
     def list_recorded_scripts(self):
         """返回 data/action_scripts/ 下所有 meta.type="recorded" 的脚本名（stem，不含扩展名）。"""
         try:
@@ -238,6 +310,12 @@ class Api:
         except Exception:
             pass
 
+        # 热键配置
+        try:
+            status['hotkeys'] = self.manager.get_hotkeys()
+        except Exception:
+            pass
+
         return status
 
 
@@ -265,7 +343,7 @@ def start_gui():
     index_path = (WEB_DIR / 'index.html').as_uri()
 
     # run webview in main thread
-    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=1180, height=780)
+    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=1680, height=920)
     webview.start()
 
 

@@ -181,11 +181,13 @@ def get_cursor_pos() -> tuple[int, int]:
 class InputRecorder:
     """录制鼠标移动/点击/键盘事件，写入 JSON 脚本文件。"""
 
-    # F7 / F8 / F9 扫描码（AT Set 2，Interception 使用此套）
-    # F1=0x3B, F2=0x3C, ... F7=0x41, F8=0x42, F9=0x43
-    HOTKEY_START = 0x41   # F7
-    HOTKEY_STOP = 0x42    # F8
-    HOTKEY_CANCEL = 0x43  # F9
+    # F1-F12 扫描码映射（AT Set 2，Interception 使用此套）
+    # 默认热键：F7=开始, F8=停止保存, F9=取消（可由 ClickerManager 通过 set_hotkeys 修改）
+    _FKEY_SCANCODE = {
+        "F1": 0x3B, "F2": 0x3C, "F3": 0x3D, "F4": 0x3E,
+        "F5": 0x3F, "F6": 0x40, "F7": 0x41, "F8": 0x42,
+        "F9": 0x43, "F10": 0x44, "F11": 0x57, "F12": 0x58,
+    }
 
     def __init__(
         self,
@@ -209,6 +211,11 @@ class InputRecorder:
         self._lock = threading.Lock()
         self._clicker_ref = None
 
+        # 热键扫描码（可配置，默认 F7/F8/F9）
+        self.HOTKEY_START = self._FKEY_SCANCODE["F7"]    # F7
+        self.HOTKEY_STOP = self._FKEY_SCANCODE["F8"]     # F8
+        self.HOTKEY_CANCEL = self._FKEY_SCANCODE["F9"]  # F9
+
         # 热键回调（由 ClickerManager 设置）：F8=停止保存，F9=取消
         # 签名：on_stop() / on_cancel()
         self.on_stop: Optional[Callable[[], None]] = None
@@ -224,6 +231,33 @@ class InputRecorder:
         self._send_thread: Optional[threading.Thread] = None
 
         self._overlay = DebugOverlay()
+
+    def set_hotkeys(self, start: str = "F7", stop: str = "F8", cancel: str = "F9") -> bool:
+        """设置录制热键（F1-F12）。
+
+        Args:
+            start: 开始录制热键（仅记录用，录制循环不检测此键）
+            stop: 停止录制并保存热键
+            cancel: 取消录制热键
+
+        Returns:
+            True 表示设置成功；False 表示存在按键冲突（未修改配置）。
+        """
+        # 互斥判定：start/stop/cancel 三个键不能重复
+        keys = [start, stop, cancel]
+        if len(keys) != len(set(keys)):
+            self.logger.warning(
+                "录制热键冲突：start=%s stop=%s cancel=%s（存在重复按键，配置未修改）",
+                start, stop, cancel,
+            )
+            return False
+        self.HOTKEY_START = self._FKEY_SCANCODE.get(start, self._FKEY_SCANCODE["F7"])
+        self.HOTKEY_STOP = self._FKEY_SCANCODE.get(stop, self._FKEY_SCANCODE["F8"])
+        self.HOTKEY_CANCEL = self._FKEY_SCANCODE.get(cancel, self._FKEY_SCANCODE["F9"])
+        self.logger.info("录制热键已设置: start=%s(0x%02X) stop=%s(0x%02X) cancel=%s(0x%02X)",
+                         start, self.HOTKEY_START, stop, self.HOTKEY_STOP,
+                         cancel, self.HOTKEY_CANCEL)
+        return True
 
     # ---- 公开 API ------------------------------------------------------------
     def set_clicker(self, clicker) -> None:
@@ -313,12 +347,19 @@ class InputRecorder:
         return events
 
     def save(self, events: list[dict], name: str, description: str = "") -> Path:
-        """保存录制脚本到文件。"""
+        """保存录制脚本到文件。
+
+        文件名格式：{脚本名前缀}_{日期}_{时间}.json
+        例如：test_20260623_143025.json
+        """
         try:
             import re
             safe_name = re.sub(r"[^\w\-]", "_", name).strip("_")
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            filename = f"recorded_{safe_name}_{timestamp}.json"
+            # 本地时间生成文件名（用户更直观），UTC 时间记录在 meta.recorded_at
+            now_local = datetime.now()
+            date_str = now_local.strftime("%Y%m%d")
+            time_str = now_local.strftime("%H%M%S")
+            filename = f"{safe_name}_{date_str}_{time_str}.json"
             filepath = self.output_dir / filename
 
             meta = {
@@ -400,7 +441,7 @@ class InputRecorder:
             BATCH_SIZE = 64
             batch_buf = (InterceptionMouseStroke * BATCH_SIZE)()
 
-            self._overlay.log_event(">>> 录制已开始：F8 停止保存 | F9 取消 <<<")
+            self._overlay.log_event(">>> 录制已开始：按停止键保存 | 按取消键放弃 <<<")
 
             _loop_count = 0
 
@@ -469,10 +510,10 @@ class InputRecorder:
 
             action = "up" if (state & 0x0001) else "down"
 
-            # ★ 检测 F8/F9 热键（只在按下时触发，不记录这两个键）
+            # ★ 检测停止/取消热键（只在按下时触发，不记录这两个键）
             if action == "down" and scan_code == self.HOTKEY_STOP:
-                self.logger.info("录制：检测到 F8（停止保存）")
-                self._overlay.log_event(f"[{t:6.2f}s] ⏹ F8 停止录制")
+                self.logger.info("录制：检测到停止保存热键 (scan=0x%02X)", scan_code)
+                self._overlay.log_event(f"[{t:6.2f}s] ⏹ 停止录制热键")
                 self._enqueue_send(ctx, device, mouse_stroke)
                 try:
                     if self.on_stop:
@@ -482,8 +523,8 @@ class InputRecorder:
                 return
 
             if action == "down" and scan_code == self.HOTKEY_CANCEL:
-                self.logger.info("录制：检测到 F9（取消）")
-                self._overlay.log_event(f"[{t:6.2f}s] ✕ F9 取消录制")
+                self.logger.info("录制：检测到取消热键 (scan=0x%02X)", scan_code)
+                self._overlay.log_event(f"[{t:6.2f}s] ✕ 取消录制热键")
                 self._enqueue_send(ctx, device, mouse_stroke)
                 try:
                     if self.on_cancel:
