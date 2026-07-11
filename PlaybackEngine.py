@@ -367,27 +367,26 @@ class PlaybackEngine:
             kb_device, ms_device,
         )
 
-        success_flag = True
-
         try:
             # 外层循环：控制回放轮次
             while True:
-                # 每轮开始前先检查停止标志
+                # 每轮开始前先检查停止标志和循环次数（统一加锁）
                 with self._lock:
                     if self._stop_requested:
                         break
+                    if self.loop_count > 0 and self._current_loop >= self.loop_count:
+                        break
 
-                # 循环次数判断：达到指定次数则退出；loop_count=0 表示无限循环
-                if self.loop_count > 0 and self._current_loop >= self.loop_count:
-                    break
-
-                # 轮次计数+1
+                # 轮次计数+1（在锁内完成并记录）
                 with self._lock:
                     self._current_loop += 1
-                self.logger.info("开始第 %d 轮回放", self._current_loop)
+                    current_loop_snapshot = self._current_loop
+                self.logger.info("开始第 %d 轮回放", current_loop_snapshot)
 
-                # 重置本轮回放索引
-                self._playback_index = 0
+                # 每轮开始时重置成功标志和回放索引
+                success_flag = True
+                with self._lock:
+                    self._playback_index = 0
 
                 # 每轮恢复鼠标初始位置，避免相对移动脚本累积偏移
                 if start_x is not None and start_y is not None:
@@ -469,7 +468,7 @@ class PlaybackEngine:
                 if self.loop_delay > 0:
                     self.logger.info(
                         "第 %d 轮完成，等待 %.2fs 后开始下一轮",
-                        self._current_loop, self.loop_delay
+                        current_loop_snapshot, self.loop_delay
                     )
                     remaining = self.loop_delay
                     while remaining > 0:
