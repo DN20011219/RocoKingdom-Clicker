@@ -370,6 +370,9 @@ def start_gui():
     webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=1680, height=920)
     webview.start()
 
+    # webview 窗口关闭后，彻底清理所有后台线程和资源
+    manager.shutdown()
+
 
 if __name__ == '__main__':
     start_gui()

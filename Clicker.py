@@ -378,7 +378,7 @@ class ClickerManager:
 
     def _hotkey_dispatch_loop(self):
         """全局热键事件分发循环（后台线程）。"""
-        while True:
+        while self.running:
             try:
                 event = self.hotkey_listener.get_event(timeout=0.1)
                 if not event:
@@ -861,6 +861,41 @@ class ClickerManager:
             self.clicker.stop()
         self.listening = False
         self.logger.info("已退出热键监听，返回主菜单")
+
+    def shutdown(self):
+        """彻底关闭管理器，停止所有后台线程并释放资源（供 GUI 退出时调用）。"""
+        self.logger.info("开始关闭 ClickerManager...")
+
+        # 1. 停止连点器
+        if self.clicker.running:
+            self.clicker.stop()
+
+        # 2. 停止回放
+        if self._playback and self._playback.is_playing():
+            self._playback.stop()
+
+        # 3. 停止脚本执行（唤醒暂停中的线程）
+        self._stop_active_script_session(wait_timeout=2.0)
+
+        # 4. 停止录制会话
+        if self._recording_session_active and self._recorder:
+            self._recorder.stop()
+            self._recording_session_active = False
+
+        # 5. 停止录制热键监听
+        if self._recorder:
+            self._recorder.stop_hotkey_listener()
+
+        # 6. 停止全局热键监听（卸载低级别键盘钩子）
+        self.hotkey_listener.stop()
+
+        # 7. 停止热键分发线程
+        self.running = False
+        self.listening = False
+        if self._hotkey_dispatch_thread and self._hotkey_dispatch_thread.is_alive():
+            self._hotkey_dispatch_thread.join(timeout=1.0)
+
+        self.logger.info("ClickerManager 已关闭")
 
     def _on_stats(self):
         stats = self.clicker.get_stats()
