@@ -715,10 +715,17 @@ class ClickerManager:
 
     # ---- 回放控制 API ----
 
-    def play_recording(self, filepath: str | Path, speed: float = 1.0) -> bool:
+    def play_recording(self, filepath: str | Path, speed: float = 1.0,
+                       loop_count: int = 1, loop_delay: float = 0.0) -> bool:
         """加载并回放录制脚本。返回是否成功启动。
 
         所有失败路径都会通过 toast 提示用户。
+
+        Args:
+            filepath: 脚本文件路径
+            speed: 回放速度倍率（1.0 = 原速）
+            loop_count: 循环次数（1=单次，0=无限循环，>1=指定次数）
+            loop_delay: 每轮循环间隔秒数
         """
         def toast(msg: str, duration: float = 4.0):
             self._toast(msg, duration)
@@ -764,13 +771,17 @@ class ClickerManager:
                 self.logger.warning("check_compat 异常: %s", e)
 
         self._playback.speed = speed
+        # 设置循环回放参数
+        self._playback.set_loop_config(count=loop_count, delay=loop_delay)
+        loop_label = "无限" if loop_count == 0 else str(loop_count)
         if self._playback.start():
             meta = self._playback.get_meta()
             name = meta.get("name", path.stem)
             self._playback_name = name
             events_list = getattr(self._playback, "_events", [])
             n_events = len(events_list)
-            toast(f"▶ 回放启动: {name}（{n_events} 条事件，{speed}x）", duration=3.0)
+            loop_info = f"，循环 {loop_label} 次" if loop_count != 1 else ""
+            toast(f"▶ 回放启动: {name}（{n_events} 条事件，{speed}x{loop_info}）", duration=3.0)
             return True
 
         toast("❌ 回放启动失败（start() 返回 False）", duration=5.0)

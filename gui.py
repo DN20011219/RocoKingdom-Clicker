@@ -77,10 +77,17 @@ class Api:
         self.manager.cancel_recording()
         return True
 
-    def play_recording(self, script_name: str, speed: float = 1.0):
+    def play_recording(self, script_name: str, speed: float = 1.0,
+                        loop_count: int = 1, loop_delay: float = 0.0):
         """回放指定脚本（stem 名）。可播放录制脚本和动作脚本。
 
         所有异常都会通过 toast 弹窗提示，避免静默失败。
+
+        Args:
+            script_name: 脚本文件名（不含扩展名）
+            speed: 回放速度倍率（1.0 = 原速）
+            loop_count: 循环次数（1=单次，0=无限循环，>1=指定次数）
+            loop_delay: 每轮循环间隔秒数
         """
         def toast(msg: str, duration: float = 4.0):
             """在主线程弹 toast（线程安全）。"""
@@ -113,8 +120,12 @@ class Api:
                 toast(f"脚本类型: {script_type}", duration=2.0)
 
                 if script_type == "recorded":
-                    # 录制脚本 → PlaybackEngine
-                    ok = self.manager.play_recording(filepath, speed)
+                    # 录制脚本 → PlaybackEngine（支持循环）
+                    ok = self.manager.play_recording(
+                        filepath, speed,
+                        loop_count=int(loop_count),
+                        loop_delay=float(loop_delay),
+                    )
                     if not ok:
                         toast(f"❌ 回放启动失败（详见日志）", duration=5.0)
                 else:
@@ -270,10 +281,23 @@ class Api:
             status["playback_active"] = True
             status["playback_progress"] = f"事件 {idx} / {total}" if total > 0 else ""
             status["playback_paused"] = bool(pb.is_paused())
+            # 循环进度
+            cur_loop, total_loop = pb.get_loop_progress()
+            status["playback_loop_current"] = cur_loop
+            status["playback_loop_total"] = total_loop
+            if total_loop == 0:
+                status["playback_loop_label"] = f"第 {cur_loop} 轮 / 无限"
+            elif total_loop > 1:
+                status["playback_loop_label"] = f"第 {cur_loop} 轮 / {total_loop} 轮"
+            else:
+                status["playback_loop_label"] = ""
         else:
             status["playback_active"] = False
             status["playback_progress"] = ""
             status["playback_paused"] = False
+            status["playback_loop_current"] = 0
+            status["playback_loop_total"] = 1
+            status["playback_loop_label"] = ""
 
         # 录制事件计数
         try:

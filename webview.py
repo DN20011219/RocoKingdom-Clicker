@@ -294,6 +294,7 @@ class _DesktopWindow:
         center.rowconfigure(0, weight=1)
         center.rowconfigure(2, weight=0)
         center.rowconfigure(3, weight=0)
+        center.rowconfigure(4, weight=0)
         center.columnconfigure(0, weight=1)
 
         # 脚本列表
@@ -331,9 +332,54 @@ class _DesktopWindow:
         )
         self.progress_label.pack(fill="x")
 
+        # ── 循环回放选项 ──────────────────────────────────────────
+        loop_frame = ttk.LabelFrame(center, text="  循环回放  ", padding=10)
+        loop_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+
+        # 第一行：循环次数 + 无限循环复选框
+        loop_row1 = tk.Frame(loop_frame, bg=self.BG)
+        loop_row1.pack(fill="x", pady=(0, 6))
+
+        tk.Label(loop_row1, text="循环次数:", font=("Segoe UI", 9),
+                 fg=self.TEXT, bg=self.BG).pack(side="left")
+        self.loop_count_var = tk.StringVar(value="1")
+        self.loop_count_spin = tk.Spinbox(
+            loop_row1, from_=0, to=99999, width=7,
+            textvariable=self.loop_count_var, font=("Segoe UI", 10, "bold"),
+            bg=self.CARD_BG, fg=self.TEXT, buttonbackground=self.ACCENT,
+            relief="flat", bd=0,
+        )
+        self.loop_count_spin.pack(side="left", padx=(6, 8))
+        tk.Label(loop_row1, text="(0 = 无限循环)", font=("Segoe UI", 8),
+                 fg=self.TEXT_MUTED, bg=self.BG).pack(side="left")
+
+        # 第二行：循环间隔
+        loop_row2 = tk.Frame(loop_frame, bg=self.BG)
+        loop_row2.pack(fill="x")
+
+        tk.Label(loop_row2, text="每轮间隔:", font=("Segoe UI", 9),
+                 fg=self.TEXT, bg=self.BG).pack(side="left")
+        self.loop_delay_var = tk.StringVar(value="0")
+        self.loop_delay_entry = tk.Entry(
+            loop_row2, textvariable=self.loop_delay_var, width=8,
+            font=("Segoe UI", 10, "bold"),
+            bg=self.CARD_BG, fg=self.TEXT, insertbackground=self.TEXT,
+            relief="flat", bd=0,
+        )
+        self.loop_delay_entry.pack(side="left", padx=(6, 4))
+        tk.Label(loop_row2, text="秒", font=("Segoe UI", 9),
+                 fg=self.TEXT_MUTED, bg=self.BG).pack(side="left")
+
+        # 循环进度标签（回放时显示）
+        self.loop_progress_label = tk.Label(
+            loop_frame, text="", font=("Segoe UI", 9, "bold"),
+            fg=self.ACCENT, bg=self.BG, anchor="w",
+        )
+        self.loop_progress_label.pack(fill="x", pady=(6, 0))
+
         # 列表操作按钮（两行）
         script_btns = ttk.Frame(center)
-        script_btns.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        script_btns.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         script_btns.columnconfigure(0, weight=1)
         script_btns.columnconfigure(1, weight=1)
         script_btns.columnconfigure(2, weight=1)
@@ -354,7 +400,7 @@ class _DesktopWindow:
 
         # 第二行：删除 / 刷新
         script_btns2 = ttk.Frame(center)
-        script_btns2.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        script_btns2.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         script_btns2.columnconfigure(0, weight=1)
         script_btns2.columnconfigure(1, weight=1)
         ttk.Button(script_btns2, text="🗑 删除",
@@ -545,7 +591,20 @@ class _DesktopWindow:
                 push_toast(f"▶ 点击执行: {stem}", duration=2.0)
             except Exception:
                 pass
-            self.js_api.play_recording(stem)
+            # 读取循环配置
+            try:
+                loop_count = int(self.loop_count_var.get())
+                if loop_count < 0:
+                    loop_count = 1
+            except (ValueError, tk.TclError):
+                loop_count = 1
+            try:
+                loop_delay = float(self.loop_delay_var.get())
+                if loop_delay < 0:
+                    loop_delay = 0.0
+            except (ValueError, tk.TclError):
+                loop_delay = 0.0
+            self.js_api.play_recording(stem, loop_count=loop_count, loop_delay=loop_delay)
         except Exception as exc:
             messagebox.showerror("执行失败", str(exc))
 
@@ -784,8 +843,10 @@ class _DesktopWindow:
         playback_active = bool(status.get("playback_active"))
         playback_paused = bool(status.get("playback_paused"))
         progress_info = status.get("playback_progress", "")
+        loop_label = status.get("playback_loop_label", "")
         if playback_active and progress_info:
-            self.progress_label.config(text=progress_info)
+            display_text = f"{progress_info}  {loop_label}".strip() if loop_label else progress_info
+            self.progress_label.config(text=display_text)
             self.progress_bar.config(mode="determinate")
             try:
                 parts = progress_info.split("/")
@@ -796,7 +857,7 @@ class _DesktopWindow:
             except Exception:
                 self.progress_var.set(0)
         elif playback_active:
-            self.progress_label.config(text="回放中…")
+            self.progress_label.config(text=f"回放中…  {loop_label}".strip())
             self.progress_bar.config(mode="indeterminate")
             self.progress_bar.start(200)
         else:
@@ -805,6 +866,23 @@ class _DesktopWindow:
             self.progress_var.set(0)
             if playback_active is False:
                 self.progress_bar.stop()
+
+        # 循环进度标签
+        if playback_active and loop_label:
+            self.loop_progress_label.config(text=f"🔄 {loop_label}", foreground=self.ACCENT)
+        else:
+            self.loop_progress_label.config(text="")
+
+        # 回放时禁用循环配置输入（防止用户中途修改）
+        try:
+            if playback_active:
+                self.loop_count_spin.configure(state="disabled", fg="#64748b")
+                self.loop_delay_entry.configure(state="disabled", fg="#64748b")
+            else:
+                self.loop_count_spin.configure(state="normal", fg=self.TEXT)
+                self.loop_delay_entry.configure(state="normal", fg=self.TEXT)
+        except Exception:
+            pass
 
         # ---- 暂停/继续/停止 按钮状态管理 ----
         # 判断当前是否有东西在运行（脚本或回放）
