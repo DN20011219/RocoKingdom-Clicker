@@ -86,6 +86,8 @@ class PlaybackEngine:
         self._anchors: list[dict] = []
         # 预处理后的事件列表（每轮回放前重新生成）
         self._processed_events: list[dict] = []
+        # 路径扰动策略：'sine' (正弦) 或 'fitts' (拟人化)
+        self.path_strategy: str = "fitts"
 
         # ---------- 循环回放配置 ----------
         # 循环次数：1=默认单次，0=无限循环，>1=循环指定次数
@@ -150,7 +152,7 @@ class PlaybackEngine:
             return list(self._events)
 
         from PathPlanner import PathPlanner
-        planner = PathPlanner()
+        planner = PathPlanner(strategy=self.path_strategy)
 
         # 判断是否为泄漏的 F12 键事件（旧版录制未吞掉 F12 up）
         def _is_leaked_f12(ev: dict) -> bool:
