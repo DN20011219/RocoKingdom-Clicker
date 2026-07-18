@@ -142,7 +142,11 @@ class PathPlanner:
         self, total_dx: int, total_dy: int,
         original_moves: list[dict], rng: random.Random,
     ) -> list[dict]:
-        """Fitts 拟人化：微抖动 + 弧线 + 过冲 + 精确校正。"""
+        """Fitts 拟人化：平滑低频扰动 + 弧线 + 过冲 + 精确校正。
+
+        核心：用多个随机频率正弦波叠加产生平滑连续扰动，
+        避免独立噪声导致的锯齿状跳动，模拟手臂惯性运动。
+        """
         n = len(original_moves)
         dist = math.sqrt(total_dx * total_dx + total_dy * total_dy)
 
@@ -155,43 +159,66 @@ class PathPlanner:
 
         # 自适应缩放：距离越远扰动越大（但设上限）
         scale = min(dist / 200.0, 1.5)
-        jitter_sigma = self.fitts_jitter_px * scale
         arc_amp = self.fitts_arc_px * scale
+        jitter_amp = self.fitts_jitter_px * scale * 3  # 平滑波振幅可更大
 
-        # 随机弧线参数
+        # 生成平滑低频噪声：叠加 2~4 个随机频率的正弦波
+        # 每个分量：random_amp * sin(random_freq * π * u + random_phase)
+        # 低频范围 0.5~3.0，确保步间变化平滑
+        n_harmonics = rng.randint(2, 4)
+        harm_x = []
+        harm_y = []
+        for _ in range(n_harmonics):
+            freq = rng.uniform(0.5, 3.0)
+            phase_x = rng.uniform(0, 2 * math.pi)
+            phase_y = rng.uniform(0, 2 * math.pi)
+            amp_x = jitter_amp * rng.uniform(0.3, 1.0)
+            amp_y = jitter_amp * rng.uniform(0.3, 1.0)
+            harm_x.append((amp_x, freq, phase_x))
+            harm_y.append((amp_y, freq, phase_y))
+
+        # 弧线参数
         arc_freq = rng.uniform(0.8, 1.5)
         arc_phase = rng.uniform(0, math.pi)
 
         # 过冲参数
         do_overshoot = rng.random() < self.fitts_overshoot_chance
         overshoot_pos = rng.uniform(0.70, 0.85) if do_overshoot else None
-        overshoot_px = rng.uniform(self.fitts_overshoot_px * 0.3, self.fitts_overshoot_px) if do_overshoot else 0
+        overshoot_px = rng.uniform(
+            self.fitts_overshoot_px * 0.3, self.fitts_overshoot_px,
+        ) if do_overshoot else 0
 
         perturbed_x = [0.0] * (n + 1)
         perturbed_y = [0.0] * (n + 1)
 
         for i, u in enumerate(norm_times):
-            # ① 高斯微抖动（各方向独立）
-            jx = rng.gauss(0, jitter_sigma)
-            jy = rng.gauss(0, jitter_sigma)
+            # ① 平滑低频噪声（多正弦波叠加，步间自然相关）
+            jx, jy = 0.0, 0.0
+            for amp, freq, phase in harm_x:
+                jx += amp * math.sin(freq * math.pi * u + phase)
+            for amp, freq, phase in harm_y:
+                jy += amp * math.sin(freq * math.pi * u + phase)
 
-            # ② 垂直弧线偏移（sin(πu) 包络保证首尾=0）
-            arc_offset = arc_amp * math.sin(arc_freq * math.pi * u + arc_phase) * math.sin(math.pi * u)
+            # 包络 sin(πu)：保证首尾扰动 → 0
+            envelope = math.sin(math.pi * u)
+            jx *= envelope
+            jy *= envelope
+
+            # ② 垂直弧线偏移
+            arc_offset = arc_amp * math.sin(
+                arc_freq * math.pi * u + arc_phase,
+            ) * envelope
             jx += perp_x * arc_offset
             jy += perp_y * arc_offset
 
-            # ③ 过冲：在 overshoot_pos 处沿运动方向冲过头，后续自然修正
+            # ③ 过冲：沿运动方向冲过头再平滑修正
             if do_overshoot and overshoot_pos is not None:
-                # 过冲强度用 sigmoid 过渡：overshoot_pos 之前逐渐增加到最大，之后衰减回0
                 if u < overshoot_pos:
-                    # 逐渐增加（平滑曲线）
                     t_ratio = u / overshoot_pos
-                    overshoot_strength = t_ratio * t_ratio * (3 - 2 * t_ratio)  # smoothstep
+                    overshoot_strength = t_ratio * t_ratio * (3 - 2 * t_ratio)
                 else:
-                    # 逐渐衰减
                     t_ratio = (u - overshoot_pos) / (1.0 - overshoot_pos)
                     overshoot_strength = 1.0 - t_ratio * t_ratio * (3 - 2 * t_ratio)
-                # 沿运动方向（平行）偏移
                 dir_x = total_dx / dist
                 dir_y = total_dy / dist
                 jx += dir_x * overshoot_px * overshoot_strength
@@ -208,7 +235,9 @@ class PathPlanner:
         perturbed_x[0], perturbed_y[0] = 0.0, 0.0
         perturbed_x[n], perturbed_y[n] = float(total_dx), float(total_dy)
 
-        return self._to_moves(perturbed_x, perturbed_y, original_moves, total_dx, total_dy)
+        return self._to_moves(
+            perturbed_x, perturbed_y, original_moves, total_dx, total_dy,
+        )
 
     # ---- 工具方法 ---------------------------------------------------------------
 

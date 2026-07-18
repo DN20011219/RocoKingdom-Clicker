@@ -293,6 +293,9 @@ class InputRecorder:
             self._recording = True
             self._last_move_t = -1.0
             self._anchor_count = 0
+            # ★ 自动插入起始锚点（t=0），确保第一段也能被扰动处理
+            self._anchor_count += 1
+            self._events.append(AnchorEvent(t=0.0))
 
         self.logger.info(
             "录制开始（初始鼠标坐标: %d, %d）",
