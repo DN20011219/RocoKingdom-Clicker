@@ -110,7 +110,17 @@ class KeyEvent:
         }
 
 
-RecordingEvent = MoveEvent | ClickEvent | KeyEvent
+@dataclass
+class AnchorEvent:
+    """鼠标锚点事件。仅记录时间戳，位移由回放时累加相对移动量计算。"""
+    t: float
+    type: str = "anchor"
+
+    def to_dict(self) -> dict:
+        return {"t": round(self.t, 3), "type": self.type}
+
+
+RecordingEvent = MoveEvent | ClickEvent | KeyEvent | AnchorEvent
 
 
 # ---- 调试浮窗 -----------------------------------------------------------------
@@ -216,10 +226,11 @@ class InputRecorder:
         self.HOTKEY_STOP = self._FKEY_SCANCODE["F8"]     # F8
         self.HOTKEY_CANCEL = self._FKEY_SCANCODE["F9"]  # F9
 
-        # 热键回调（由 ClickerManager 设置）：F8=停止保存，F9=取消
-        # 签名：on_stop() / on_cancel()
+        # 热键回调（由 ClickerManager 设置）：F8=停止保存，F9=取消，F12=锚点
+        # 签名：on_stop() / on_cancel() / on_anchor(n: int)
         self.on_stop: Optional[Callable[[], None]] = None
         self.on_cancel: Optional[Callable[[], None]] = None
+        self.on_anchor: Optional[Callable[[int], None]] = None
 
         self._capture_thread: Optional[threading.Thread] = None
         self._hotkey_thread: Optional[threading.Thread] = None
@@ -231,6 +242,7 @@ class InputRecorder:
         self._send_thread: Optional[threading.Thread] = None
 
         self._overlay = DebugOverlay()
+        self._anchor_count: int = 0  # 已标记的锚点数量
 
     def set_hotkeys(self, start: str = "F7", stop: str = "F8", cancel: str = "F9") -> bool:
         """设置录制热键（F1-F12）。
@@ -280,6 +292,7 @@ class InputRecorder:
             self._start_time = time.perf_counter()
             self._recording = True
             self._last_move_t = -1.0
+            self._anchor_count = 0
 
         self.logger.info(
             "录制开始（初始鼠标坐标: %d, %d）",
@@ -373,6 +386,7 @@ class InputRecorder:
                 # 录制开始时的鼠标屏幕坐标；回放前会把鼠标移到这里，再按相对量重放
                 "start_cursor_x": getattr(self, "_start_cursor_x", 0),
                 "start_cursor_y": getattr(self, "_start_cursor_y", 0),
+                "anchors": self._anchor_count,
             }
 
             payload = {"meta": meta, "events": events}
@@ -531,6 +545,29 @@ class InputRecorder:
                         self.on_cancel()
                 except Exception as e:
                     self.logger.error("on_cancel 回调异常: %s\n%s", e, traceback.format_exc())
+                return
+
+            # ★ 检测 F12 锚点标记热键（扫描码 0x58）
+            # down 和 up 都要吞掉，避免泄漏到录制数据中
+            if scan_code == 0x58:
+                if action == "down":
+                    self._anchor_count += 1
+                    with self._lock:
+                        self._events.append(AnchorEvent(t=t))
+                    self._overlay.log_event(
+                        f"[{t:6.2f}s] 📌 锚点 #{self._anchor_count}"
+                    )
+                    self.logger.info(
+                        "锚点 #%d 已标记 at t=%.3f",
+                        self._anchor_count, t,
+                    )
+                    # 直接弹 toast（不受 0.5s 节流限制）
+                    try:
+                        if self.on_anchor:
+                            self.on_anchor(self._anchor_count)
+                    except Exception as e:
+                        self.logger.error("on_anchor 回调异常: %s", e)
+                # down 和 up 都不转发给系统（吞掉此按键）
                 return
 
             key_name = SCANCODE_NAMES.get(scan_code, f"scan_{scan_code:02X}")
