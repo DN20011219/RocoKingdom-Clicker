@@ -806,3 +806,6 @@
 2026-07-20 22:12:59,283 | INFO     | 已应用热键配置到 InputRecorder: {'pause_resume': 'F2', 'start_recording': 'F7', 'stop_recording': 'F8', 'cancel_recording': 'F10', 'mark_anchor': 'F12'}
 2026-07-20 22:12:59,283 | INFO     | 全局热键监听已启动
 2026-07-20 22:12:59,283 | INFO     | 连点器管理器已初始化
+2026-07-20 22:25:36,290 | INFO     | 开始关闭 ClickerManager...
+2026-07-20 22:25:36,340 | INFO     | ClickerManager 已关闭
+2026-07-20 22:25:36,350 | INFO     | Interception 上下文已销毁

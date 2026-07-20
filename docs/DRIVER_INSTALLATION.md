@@ -28,6 +28,8 @@ third\Interception\command line installer\install-interception.exe
 
 以**管理员权限**打开 CMD 或 PowerShell，进入安装程序所在目录后执行：
 
+![以管理员权限打开终端](pic/admin_terminal.png)
+
 ```bat
 install-interception.exe /install
 ```
