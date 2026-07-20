@@ -293,6 +293,7 @@ class InputRecorder:
             self._recording = True
             self._last_move_t = -1.0
             self._anchor_count = 0
+            self._start_info_ms = None  # 延迟初始化：首个事件的硬件时间戳
             # ★ 自动插入起始锚点（t=0），确保第一段也能被扰动处理
             self._anchor_count += 1
             self._events.append(AnchorEvent(t=0.0))
@@ -495,8 +496,18 @@ class InputRecorder:
 
                 # 逐个处理本批次的事件
                 for i in range(n):
-                    t = time.perf_counter() - self._start_time
                     stroke = batch_buf[i]
+                    # ★ 使用驱动硬件时间戳（information 字段，毫秒级）
+                    # 替代 perf_counter，恢复 batch 内事件之间的真实间隔
+                    hw_ms = stroke.information
+                    if self._start_info_ms is None:
+                        self._start_info_ms = hw_ms
+                    if hw_ms != 0:
+                        t = (hw_ms - self._start_info_ms) / 1000.0
+                    else:
+                        # fallback：虚拟化环境等情况下 information 可能为 0
+                        t = time.perf_counter() - self._start_time
+
                     if is_kb:
                         self._handle_keyboard_event(lib, ctx, device, stroke, t)
                     elif is_ms:
