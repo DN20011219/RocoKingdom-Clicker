@@ -28,8 +28,10 @@ third\Interception\command line installer\install-interception.exe
 
 以**管理员权限**打开 CMD 或 PowerShell，进入安装程序所在目录后执行：
 
+![以管理员权限打开终端](pic/admin_terminal.png)
+
 ```bat
-install-interception.exe /install
+./install-interception.exe /install
 ```
 
 如果看到以下输出，说明驱动安装成功：
@@ -66,7 +68,7 @@ python Clicker.py --gui
 如果之后想移除驱动，同样以管理员权限进入同一目录并执行：
 
 ```bat
-install-interception.exe /uninstall
+./install-interception.exe /uninstall
 ```
 
 然后重启系统即可。

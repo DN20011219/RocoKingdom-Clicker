@@ -45,6 +45,16 @@ if (Test-Path $installer) {
     Write-Warning "install-interception.exe not found"
 }
 
+Write-Host "Copying docs/ folder (from _internal/)..."
+$docsInternal = Join-Path $Dist '_internal\docs'
+$docsDst = Join-Path $Dist 'docs'
+if (Test-Path $docsInternal) {
+    if (Test-Path $docsDst) { Remove-Item -Path $docsDst -Recurse -Force }
+    Copy-Item -Path $docsInternal -Destination $docsDst -Recurse -Force
+} else {
+    Write-Warning "_internal\docs not found (PyInstaller may not have included it)"
+}
+
 Write-Host "Copying third-party licenses (third_party_licenses\Interception\)..."
 $licSrc = Join-Path $Root 'third\Interception\licenses'
 $licDst = Join-Path $Dist 'third_party_licenses\Interception'

@@ -2,5 +2,6 @@
     "pause_resume": "F2",
     "start_recording": "F7",
     "stop_recording": "F8",
-    "cancel_recording": "F10"
+    "cancel_recording": "F10",
+    "mark_anchor": "F12"
 }

@@ -81,6 +81,14 @@ class PlaybackEngine:
         # 回放完成回调，签名 callback(success: bool, stopped: bool)
         self.on_complete: Optional[Callable[[bool, bool], None]] = None
 
+        # ---------- 锚点扰动配置 ----------
+        # 解析后的锚点列表：[{"t": float, "index": int}, ...]
+        self._anchors: list[dict] = []
+        # 预处理后的事件列表（每轮回放前重新生成）
+        self._processed_events: list[dict] = []
+        # 路径扰动策略：'sine' (正弦) 或 'fitts' (拟人化)
+        self.path_strategy: str = "fitts"
+
         # ---------- 循环回放配置 ----------
         # 循环次数：1=默认单次，0=无限循环，>1=循环指定次数
         self.loop_count: int = 1
@@ -105,14 +113,102 @@ class PlaybackEngine:
             return False
 
         self._events = self._script.get("events", [])
+        # 解析锚点
+        self._parse_anchors()
         self.logger.info(
-            "已加载脚本: %s，共 %d 条事件",
-            meta.get("name", "?"), len(self._events),
+            "已加载脚本: %s，共 %d 条事件，%d 个锚点",
+            meta.get("name", "?"), len(self._events), len(self._anchors),
         )
         return True
 
     def get_meta(self) -> dict:
         return self._script.get("meta", {}) if self._script else {}
+
+    # ---- 锚点解析与路径扰动预处理 -------------------------------------------
+
+    def _parse_anchors(self):
+        """从事件列表中解析所有 anchor 事件，记录其时间和索引。"""
+        self._anchors = []
+        for idx, ev in enumerate(self._events):
+            if ev.get("type") == "anchor":
+                self._anchors.append({
+                    "t": float(ev.get("t", 0.0)),
+                    "index": idx,
+                })
+        if self._anchors:
+            self.logger.info("已解析 %d 个锚点", len(self._anchors))
+
+    def _preprocess_events(self) -> list[dict]:
+        """基于锚点预处理事件列表，生成扰动路径。
+
+        如果没有锚点，直接返回原始事件列表。
+        如果有锚点，对相邻锚点之间的 move 事件施加路径扰动：
+          - 累加段内所有相对移动量得到总位移向量
+          - 用 PathPlanner 在垂直方向叠加正弦扰动
+          - 首尾点扰动量 = 0，保证最终位置精确一致
+          - 在每个锚点处插入 x=0,y=0 的 no-op move 占位时间戳
+        """
+        if not self._anchors:
+            return list(self._events)
+
+        from PathPlanner import PathPlanner
+        planner = PathPlanner(strategy=self.path_strategy)
+
+        # 判断是否为泄漏的 F12 键事件（旧版录制未吞掉 F12 up）
+        def _is_leaked_f12(ev: dict) -> bool:
+            return (ev.get("type") == "key"
+                    and ev.get("code") == 0x58
+                    and ev.get("key") == "F12")
+
+        processed: list[dict] = []
+        prev_index = 0
+
+        for anchor in self._anchors:
+            seg_start_idx = prev_index
+            seg_end_idx = anchor["index"]
+
+            # 收集该段中的事件，按类型分离
+            segment_all = self._events[seg_start_idx:seg_end_idx]
+            segment_moves = [e for e in segment_all if e.get("type") == "move"]
+            segment_others = [
+                e for e in segment_all
+                if e.get("type") != "move"
+                and e.get("type") != "anchor"
+                and not _is_leaked_f12(e)
+            ]
+
+            if segment_moves:
+                # 累加相对移动量得到总位移向量
+                total_dx = sum(int(m.get("x", 0)) for m in segment_moves)
+                total_dy = sum(int(m.get("y", 0)) for m in segment_moves)
+                perturbed_moves = planner.generate_path(
+                    total_dx, total_dy, segment_moves,
+                )
+                processed.extend(perturbed_moves)
+            processed.extend(segment_others)
+
+            # ★ 插入 no-op move 占位锚点时间戳
+            processed.append({
+                "t": anchor["t"],
+                "type": "move",
+                "x": 0,
+                "y": 0,
+            })
+
+            prev_index = anchor["index"] + 1
+
+        # 处理最后一个锚点之后的事件
+        last_idx = self._anchors[-1]["index"] + 1 if self._anchors else 0
+        tail_events = self._events[last_idx:]
+        for e in tail_events:
+            if e.get("type") != "anchor" and not _is_leaked_f12(e):
+                processed.append(e)
+
+        self.logger.info(
+            "锚点预处理完成: %d 个锚点, %d → %d 条事件",
+            len(self._anchors), len(self._events), len(processed),
+        )
+        return processed
 
     # ---- 设备枚举 -----------------------------------------------------------
     def _find_keyboard_device(self) -> Optional[int]:
@@ -385,6 +481,8 @@ class PlaybackEngine:
 
                 # 每轮开始时重置成功标志和回放索引
                 success_flag = True
+                # 每轮回放前预处理事件（生成新的扰动路径）
+                self._processed_events = self._preprocess_events()
                 with self._lock:
                     self._playback_index = 0
 
@@ -398,11 +496,11 @@ class PlaybackEngine:
 
                 last_t = 0.0
 
-                # ========== 单轮事件回放（原有逻辑完整保留） ==========
-                for idx, ev in enumerate(self._events):
+                # ========== 单轮事件回放（使用预处理后的事件） ==========
+                for idx, ev in enumerate(self._processed_events):
                     with self._lock:
                         if self._stop_requested:
-                            self.logger.info("回放被用户停止 (%d/%d)", idx, len(self._events))
+                            self.logger.info("回放被用户停止 (%d/%d)", idx, len(self._processed_events))
                             break
                         self._playback_index = idx
 

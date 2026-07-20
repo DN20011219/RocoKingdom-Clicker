@@ -326,6 +326,8 @@ class ClickerManager:
             # 设置停止/取消热键回调（在录制线程里检测到热键时触发）
             self._recorder.on_stop = self._on_recording_hotkey_stop
             self._recorder.on_cancel = self._on_recording_hotkey_cancel
+            # 设置锚点回调（F12 按下时触发，直接弹 toast）
+            self._recorder.on_anchor = self._on_anchor_marked
             # 设置 overlay 事件回调（把录制事件计数推送到 toast）
             self._recorder._overlay.on_event = self._on_recording_event
             # 应用当前热键配置到录制器
@@ -357,6 +359,7 @@ class ClickerManager:
                 start=self._hotkeys["start_recording"],
                 stop=self._hotkeys["stop_recording"],
                 cancel=self._hotkeys["cancel_recording"],
+                anchor=self._hotkeys.get("mark_anchor", "F12"),
             )
             if ok:
                 self.logger.info("已应用热键配置到 InputRecorder: %s", self._hotkeys)
@@ -548,6 +551,13 @@ class ClickerManager:
         """录制事件回调（由 DebugOverlay 调用）：把消息推送到 toast。"""
         try:
             self._toast(msg, duration=0.8)
+        except Exception:
+            pass
+
+    def _on_anchor_marked(self, n: int):
+        """锚点标记回调（F12 按下时由录制线程调用）：直接弹 toast 提示。"""
+        try:
+            self._toast(f"📌 锚点 #{n} 已标记", duration=2.5)
         except Exception:
             pass
 
