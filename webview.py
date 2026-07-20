@@ -431,6 +431,7 @@ class _DesktopWindow:
             "start_recording": "开始录制",
             "stop_recording": "停止录制并保存",
             "cancel_recording": "取消录制",
+            "mark_anchor": "标记锚点（录制中）",
         }
         for key_name, label_text in self._hotkey_labels.items():
             row = ttk.Frame(hotkey_panel)

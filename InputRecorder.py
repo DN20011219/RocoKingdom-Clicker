@@ -221,10 +221,11 @@ class InputRecorder:
         self._lock = threading.Lock()
         self._clicker_ref = None
 
-        # 热键扫描码（可配置，默认 F7/F8/F9）
+        # 热键扫描码（可配置，默认 F7/F8/F9/F12）
         self.HOTKEY_START = self._FKEY_SCANCODE["F7"]    # F7
         self.HOTKEY_STOP = self._FKEY_SCANCODE["F8"]     # F8
         self.HOTKEY_CANCEL = self._FKEY_SCANCODE["F9"]  # F9
+        self.HOTKEY_ANCHOR = self._FKEY_SCANCODE["F12"] # F12
 
         # 热键回调（由 ClickerManager 设置）：F8=停止保存，F9=取消，F12=锚点
         # 签名：on_stop() / on_cancel() / on_anchor(n: int)
@@ -244,31 +245,34 @@ class InputRecorder:
         self._overlay = DebugOverlay()
         self._anchor_count: int = 0  # 已标记的锚点数量
 
-    def set_hotkeys(self, start: str = "F7", stop: str = "F8", cancel: str = "F9") -> bool:
+    def set_hotkeys(self, start: str = "F7", stop: str = "F8", cancel: str = "F9",
+                    anchor: str = "F12") -> bool:
         """设置录制热键（F1-F12）。
 
         Args:
             start: 开始录制热键（仅记录用，录制循环不检测此键）
             stop: 停止录制并保存热键
             cancel: 取消录制热键
+            anchor: 标记锚点热键
 
         Returns:
             True 表示设置成功；False 表示存在按键冲突（未修改配置）。
         """
-        # 互斥判定：start/stop/cancel 三个键不能重复
-        keys = [start, stop, cancel]
+        # 互斥判定：start/stop/cancel/anchor 四个键不能重复
+        keys = [start, stop, cancel, anchor]
         if len(keys) != len(set(keys)):
             self.logger.warning(
-                "录制热键冲突：start=%s stop=%s cancel=%s（存在重复按键，配置未修改）",
-                start, stop, cancel,
+                "录制热键冲突：start=%s stop=%s cancel=%s anchor=%s（存在重复按键，配置未修改）",
+                start, stop, cancel, anchor,
             )
             return False
         self.HOTKEY_START = self._FKEY_SCANCODE.get(start, self._FKEY_SCANCODE["F7"])
         self.HOTKEY_STOP = self._FKEY_SCANCODE.get(stop, self._FKEY_SCANCODE["F8"])
         self.HOTKEY_CANCEL = self._FKEY_SCANCODE.get(cancel, self._FKEY_SCANCODE["F9"])
-        self.logger.info("录制热键已设置: start=%s(0x%02X) stop=%s(0x%02X) cancel=%s(0x%02X)",
+        self.HOTKEY_ANCHOR = self._FKEY_SCANCODE.get(anchor, self._FKEY_SCANCODE["F12"])
+        self.logger.info("录制热键已设置: start=%s(0x%02X) stop=%s(0x%02X) cancel=%s(0x%02X) anchor=%s(0x%02X)",
                          start, self.HOTKEY_START, stop, self.HOTKEY_STOP,
-                         cancel, self.HOTKEY_CANCEL)
+                         cancel, self.HOTKEY_CANCEL, anchor, self.HOTKEY_ANCHOR)
         return True
 
     # ---- 公开 API ------------------------------------------------------------
@@ -576,9 +580,9 @@ class InputRecorder:
                     self.logger.error("on_cancel 回调异常: %s\n%s", e, traceback.format_exc())
                 return
 
-            # ★ 检测 F12 锚点标记热键（扫描码 0x58）
+            # ★ 检测锚点标记热键（扫描码可配置，默认 F12）
             # down 和 up 都要吞掉，避免泄漏到录制数据中
-            if scan_code == 0x58:
+            if scan_code == self.HOTKEY_ANCHOR:
                 if action == "down":
                     self._anchor_count += 1
                     with self._lock:

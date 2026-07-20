@@ -359,6 +359,7 @@ class ClickerManager:
                 start=self._hotkeys["start_recording"],
                 stop=self._hotkeys["stop_recording"],
                 cancel=self._hotkeys["cancel_recording"],
+                anchor=self._hotkeys.get("mark_anchor", "F12"),
             )
             if ok:
                 self.logger.info("已应用热键配置到 InputRecorder: %s", self._hotkeys)

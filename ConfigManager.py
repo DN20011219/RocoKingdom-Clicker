@@ -31,6 +31,7 @@ DEFAULT_HOTKEYS = {
     "start_recording": "F7",    # 开始录制
     "stop_recording": "F8",     # 停止录制并保存
     "cancel_recording": "F9",   # 取消录制
+    "mark_anchor": "F12",       # 录制时标记锚点
 }
 
 # 热键显示名称
@@ -39,6 +40,7 @@ HOTKEY_LABELS = {
     "start_recording": "开始录制",
     "stop_recording": "停止录制并保存",
     "cancel_recording": "取消录制",
+    "mark_anchor": "标记锚点（录制中）",
 }
 
 

@@ -740,3 +740,48 @@
 2026-07-19 22:03:21,266 | INFO     | 开始关闭 ClickerManager...
 2026-07-19 22:03:21,319 | INFO     | ClickerManager 已关闭
 2026-07-19 22:03:21,335 | INFO     | Interception 上下文已销毁
+2026-07-20 21:59:51,614 | INFO     | 成功加载 Interception 库 (x64): C:\Users\17676\Desktop\开发中\clicker-anchor\third\Interception\library\x64\interception.dll
+2026-07-20 21:59:51,615 | INFO     | Interception 上下文已创建，设备 ID: 11
+2026-07-20 21:59:51,615 | INFO     | InterceptionCore 初始化完成
+2026-07-20 21:59:51,615 | INFO     | Interception 上下文已销毁
+2026-07-20 21:59:51,632 | INFO     | 成功加载 Interception 库 (x64): C:\Users\17676\Desktop\开发中\clicker-anchor\third\Interception\library\x64\interception.dll
+2026-07-20 21:59:51,632 | INFO     | Interception 上下文已创建，设备 ID: 11
+2026-07-20 21:59:51,632 | INFO     | InterceptionCore 初始化完成
+2026-07-20 21:59:51,632 | INFO     | 加载 Interception: interception.dll
+2026-07-20 21:59:51,632 | INFO     | ActionExecutor Interception 已初始化
+2026-07-20 21:59:51,633 | INFO     | 热键配置已从 C:\Users\17676\Desktop\开发中\clicker-anchor\data\clicker_configs\hotkeys.json 加载
+2026-07-20 21:59:51,634 | INFO     | 录制热键已设置: start=F7(0x41) stop=F8(0x42) cancel=F10(0x44)
+2026-07-20 21:59:51,634 | INFO     | 已应用热键配置到 InputRecorder: {'pause_resume': 'F2', 'start_recording': 'F7', 'stop_recording': 'F8', 'cancel_recording': 'F10'}
+2026-07-20 21:59:51,634 | INFO     | InputRecorder 初始化完成
+2026-07-20 21:59:51,634 | INFO     | PlaybackEngine 初始化完成
+2026-07-20 21:59:51,634 | INFO     | 录制热键已设置: start=F7(0x41) stop=F8(0x42) cancel=F10(0x44)
+2026-07-20 21:59:51,634 | INFO     | 已应用热键配置到 InputRecorder: {'pause_resume': 'F2', 'start_recording': 'F7', 'stop_recording': 'F8', 'cancel_recording': 'F10'}
+2026-07-20 21:59:51,634 | INFO     | 全局热键监听已启动
+2026-07-20 21:59:51,635 | INFO     | 连点器管理器已初始化
+2026-07-20 21:59:57,374 | INFO     | start_recording 被调用: name=recording
+2026-07-20 21:59:57,374 | INFO     | 调用 recorder.start() …
+2026-07-20 21:59:57,375 | INFO     | 录制开始（初始鼠标坐标: 555, 1090）
+2026-07-20 21:59:57,375 | INFO     | 录制捕获线程启动
+2026-07-20 21:59:57,375 | INFO     | 录制开始：recording
+2026-07-20 21:59:57,376 | INFO     | 录制：已创建 Interception 上下文 ctx=2978305934832
+2026-07-20 21:59:57,376 | INFO     | 录制循环已启动，等待事件…
+2026-07-20 22:00:18,697 | INFO     | 录制：检测到停止保存热键 (scan=0x42)
+2026-07-20 22:00:18,697 | INFO     | 停止录制热键：停止录制并保存
+2026-07-20 22:00:18,698 | INFO     | 停止录制：开始获取事件…
+2026-07-20 22:00:18,698 | INFO     | 录制：已销毁 Interception 上下文
+2026-07-20 22:00:18,699 | INFO     | 录制结束：共 1118 条事件
+2026-07-20 22:00:18,699 | INFO     | 停止录制：收到 1118 条事件
+2026-07-20 22:00:18,699 | INFO     | 录制捕获线程退出（共处理 1118 次循环）
+2026-07-20 22:00:18,699 | INFO     | 保存录制：调用 save() …
+2026-07-20 22:00:18,708 | INFO     | 脚本已保存: C:\Users\17676\Desktop\开发中\clicker-anchor\data\action_scripts\recording_20260720_220018.json（98097 字节，1118 条事件）
+2026-07-20 22:00:18,708 | INFO     | 录制已保存: C:\Users\17676\Desktop\开发中\clicker-anchor\data\action_scripts\recording_20260720_220018.json（共 1118 条事件）
+2026-07-20 22:00:22,479 | INFO     | 已解析 1 个锚点
+2026-07-20 22:00:22,479 | INFO     | 已加载脚本: recording，共 1118 条事件，1 个锚点
+2026-07-20 22:00:22,479 | INFO     | 循环配置已更新：次数=1，间隔=0.00s
+2026-07-20 22:00:22,480 | INFO     | 回放：已找到键盘设备 1
+2026-07-20 22:00:22,480 | INFO     | 回放：已找到鼠标设备 11
+2026-07-20 22:00:22,480 | INFO     | 开始回放（共 1118 条事件，速度 1.0x，循环次数=1，键盘=1，鼠标=11）
+2026-07-20 22:00:22,480 | INFO     | 开始第 1 轮回放
+2026-07-20 22:00:22,480 | INFO     | play_recording: ▶ 回放启动: recording（1118 条事件，1.0x）
+2026-07-20 22:00:22,481 | INFO     | 锚点预处理完成: 1 个锚点, 1118 → 1118 条事件
+2026-07-20 22:00:51,763 | INFO     | 回放全部结束（共完成 1 轮，success=True，stopped=False）
