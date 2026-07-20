@@ -499,7 +499,22 @@ class InputRecorder:
                     stroke = batch_buf[i]
                     # ★ 使用驱动硬件时间戳（information 字段，毫秒级）
                     # 替代 perf_counter，恢复 batch 内事件之间的真实间隔
-                    hw_ms = stroke.information
+                    #
+                    # 注意：InterceptionMouseStroke 和 InterceptionKeyStroke 的
+                    # information 字段偏移不同（mouse: offset 16, key: offset 4），
+                    # 所以键盘设备必须从正确的 offset 读取
+                    if is_kb:
+                        # 键盘 stroke 只有 8 字节，information 在 offset 4
+                        key_stroke = InterceptionKeyStroke()
+                        ctypes.memmove(
+                            ctypes.byref(key_stroke),
+                            ctypes.addressof(batch_buf) + i * ctypes.sizeof(InterceptionKeyStroke),
+                            ctypes.sizeof(InterceptionKeyStroke),
+                        )
+                        hw_ms = key_stroke.information
+                    else:
+                        hw_ms = stroke.information
+
                     if self._start_info_ms is None:
                         self._start_info_ms = hw_ms
                     if hw_ms != 0:
