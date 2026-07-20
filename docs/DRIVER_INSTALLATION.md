@@ -31,7 +31,7 @@ third\Interception\command line installer\install-interception.exe
 ![以管理员权限打开终端](pic/admin_terminal.png)
 
 ```bat
-install-interception.exe /install
+./install-interception.exe /install
 ```
 
 如果看到以下输出，说明驱动安装成功：
