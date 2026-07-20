@@ -68,7 +68,7 @@ python Clicker.py --gui
 如果之后想移除驱动，同样以管理员权限进入同一目录并执行：
 
 ```bat
-install-interception.exe /uninstall
+./install-interception.exe /uninstall
 ```
 
 然后重启系统即可。
