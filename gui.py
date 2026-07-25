@@ -252,6 +252,30 @@ class Api:
         ConfigManager.save_config(self.manager.clicker.config, "default")
         return self.manager.clicker.config.move_mouse
 
+    # ---- 锚点模式 API ----
+
+    def get_anchor_mode(self) -> str:
+        """返回当前锚点模式：'point' 或 'segment'。"""
+        try:
+            return ConfigManager.load_anchor_mode()
+        except Exception:
+            return "point"
+
+    def set_anchor_mode(self, mode: str) -> bool:
+        """设置锚点模式并同步到录制器。返回是否成功。"""
+        try:
+            if mode not in ("point", "segment"):
+                return False
+            ok = ConfigManager.save_anchor_mode(mode)
+            if ok:
+                # 同步到录制器
+                rec = getattr(self.manager, "_recorder", None)
+                if rec:
+                    rec.anchor_mode = mode
+            return ok
+        except Exception:
+            return False
+
     def get_status(self):
         cfg = self.manager.clicker.config
         # 仅返回对用户有用的精简字段；在 move_mouse 为 True 时才包含位置信息

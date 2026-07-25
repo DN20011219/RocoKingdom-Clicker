@@ -34,6 +34,9 @@ DEFAULT_HOTKEYS = {
     "mark_anchor": "F12",       # 录制时标记锚点
 }
 
+# 默认锚点模式："point"（点锚点，路径扰动）或 "segment"（段锚点，区间保护）
+DEFAULT_ANCHOR_MODE = "point"
+
 # 热键显示名称
 HOTKEY_LABELS = {
     "pause_resume": "暂停/继续",
@@ -298,4 +301,43 @@ class ConfigManager:
             return True
         except Exception as e:
             cls.logger.error("保存热键配置失败: %s", e)
+            return False
+
+    # ---- 锚点模式配置 ----
+
+    @classmethod
+    def load_anchor_mode(cls) -> str:
+        """加载锚点模式配置，返回 'point' 或 'segment'。"""
+        cls.ensure_config_dir()
+        if cls.HOTKEYS_FILE.exists():
+            try:
+                with open(cls.HOTKEYS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                mode = data.get("anchor_mode", DEFAULT_ANCHOR_MODE)
+                if mode in ("point", "segment"):
+                    return mode
+            except Exception as e:
+                cls.logger.warning("加载锚点模式失败: %s，使用默认配置", e)
+        return DEFAULT_ANCHOR_MODE
+
+    @classmethod
+    def save_anchor_mode(cls, mode: str) -> bool:
+        """保存锚点模式配置到 hotkeys.json。"""
+        if mode not in ("point", "segment"):
+            cls.logger.warning("无效的锚点模式: %s", mode)
+            return False
+        cls.ensure_config_dir()
+        try:
+            # 读取现有配置，追加/更新 anchor_mode 字段
+            data = {}
+            if cls.HOTKEYS_FILE.exists():
+                with open(cls.HOTKEYS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            data["anchor_mode"] = mode
+            with open(cls.HOTKEYS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            cls.logger.info("锚点模式已保存: %s", mode)
+            return True
+        except Exception as e:
+            cls.logger.error("保存锚点模式失败: %s", e)
             return False

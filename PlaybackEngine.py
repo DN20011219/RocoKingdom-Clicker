@@ -88,6 +88,10 @@ class PlaybackEngine:
         self._processed_events: list[dict] = []
         # 路径扰动策略：'sine' (正弦) 或 'fitts' (拟人化)
         self.path_strategy: str = "fitts"
+        # 锚点模式：'point'（点锚点）或 'segment'（段锚点）
+        self.anchor_mode: str = "point"
+        # 段锚点边界列表：[{"start_t", "end_t", "start_idx", "end_idx"}, ...]
+        self._segments: list[dict] = []
 
         # ---------- 循环回放配置 ----------
         # 循环次数：1=默认单次，0=无限循环，>1=循环指定次数
@@ -127,30 +131,124 @@ class PlaybackEngine:
     # ---- 锚点解析与路径扰动预处理 -------------------------------------------
 
     def _parse_anchors(self):
-        """从事件列表中解析所有 anchor 事件，记录其时间和索引。"""
+        """从事件列表中解析所有 anchor 事件和 segment 事件，记录其时间和索引。"""
         self._anchors = []
-        for idx, ev in enumerate(self._events):
-            if ev.get("type") == "anchor":
-                self._anchors.append({
-                    "t": float(ev.get("t", 0.0)),
-                    "index": idx,
-                })
-        if self._anchors:
-            self.logger.info("已解析 %d 个锚点", len(self._anchors))
+        self._segments = []
+
+        # 检测是否包含段锚点事件（自动识别模式）
+        has_segment_events = any(
+            ev.get("type") in ("segment_start", "segment_end")
+            for ev in self._events
+        )
+        if has_segment_events:
+            self.anchor_mode = "segment"
+
+        if self.anchor_mode == "segment":
+            # 解析段边界
+            pending_start: dict | None = None
+            for idx, ev in enumerate(self._events):
+                if ev.get("type") == "segment_start":
+                    pending_start = {"start_t": float(ev.get("t", 0.0)), "start_idx": idx}
+                elif ev.get("type") == "segment_end" and pending_start is not None:
+                    pending_start["end_t"] = float(ev.get("t", 0.0))
+                    pending_start["end_idx"] = idx
+                    self._segments.append(pending_start)
+                    pending_start = None
+            # 如果最后一个 segment_start 没有对应的 end，忽略它（或当作到末尾）
+            if pending_start is not None:
+                pending_start["end_t"] = float(self._events[-1].get("t", 0.0)) if self._events else 0.0
+                pending_start["end_idx"] = len(self._events) - 1
+                self._segments.append(pending_start)
+            if self._segments:
+                self.logger.info("已解析 %d 个段锚点", len(self._segments))
+        else:
+            # 点锚点模式（原有逻辑）
+            for idx, ev in enumerate(self._events):
+                if ev.get("type") == "anchor":
+                    self._anchors.append({
+                        "t": float(ev.get("t", 0.0)),
+                        "index": idx,
+                    })
+            if self._anchors:
+                self.logger.info("已解析 %d 个锚点", len(self._anchors))
 
     def _preprocess_events(self) -> list[dict]:
         """基于锚点预处理事件列表，生成扰动路径。
 
-        如果没有锚点，直接返回原始事件列表。
-        如果有锚点，对相邻锚点之间的 move 事件施加路径扰动：
-          - 累加段内所有相对移动量得到总位移向量
-          - 用 PathPlanner 在垂直方向叠加正弦扰动
-          - 首尾点扰动量 = 0，保证最终位置精确一致
-          - 在每个锚点处插入 x=0,y=0 的 no-op move 占位时间戳
+        根据 anchor_mode 分流：
+          - 'segment' 模式：段内事件原样保留，桥接段的 move 用 PathPlanner 扰动
+          - 'point' 模式：相邻锚点之间的 move 事件施加路径扰动
         """
-        if not self._anchors:
+        if self.anchor_mode == "segment" and self._segments:
+            return self._preprocess_events_segment()
+        elif self._anchors:
+            return self._preprocess_events_point()
+        else:
             return list(self._events)
 
+    def _preprocess_events_segment(self) -> list[dict]:
+        """段锚点模式预处理：段内原样保留，桥接段 move 用 PathPlanner 扰动。
+
+        时间线：[桥接] → [段START...段END] → [桥接] → [段START...段END] → [桥接]
+        - 段内（start_idx ~ end_idx）：所有事件原样保留
+        - 桥接（end_idx+1 ~ 下一个 start_idx-1）：move 事件扰动，其他事件保留
+        """
+        from PathPlanner import PathPlanner
+        planner = PathPlanner(strategy=self.path_strategy)
+
+        processed: list[dict] = []
+        prev_end_idx = 0  # 上一个段结束后的下一个索引
+
+        for seg in self._segments:
+            seg_start_idx = seg["start_idx"]
+            seg_end_idx = seg["end_idx"]
+
+            # 处理桥接段（prev_end_idx ~ seg_start_idx-1）
+            bridge_events = self._events[prev_end_idx:seg_start_idx]
+            processed.extend(self._perturb_bridge(bridge_events, planner))
+
+            # 段内事件原样保留（跳过 segment_start/segment_end 标记事件本身）
+            for ev in self._events[seg_start_idx:seg_end_idx + 1]:
+                ev_type = ev.get("type", "")
+                if ev_type in ("segment_start", "segment_end"):
+                    continue  # 不回放标记事件本身
+                processed.append(ev)
+
+            prev_end_idx = seg_end_idx + 1
+
+        # 处理最后一个段之后的桥接事件
+        tail_events = self._events[prev_end_idx:]
+        processed.extend(self._perturb_bridge(tail_events, planner))
+
+        self.logger.info(
+            "段锚点预处理完成: %d 个段, %d → %d 条事件",
+            len(self._segments), len(self._events), len(processed),
+        )
+        return processed
+
+    def _perturb_bridge(self, bridge_events: list[dict], planner) -> list[dict]:
+        """对桥接段的事件进行扰动处理：move 事件用 PathPlanner，其他事件原样保留。"""
+        # 分离 move 和非 move 事件
+        moves = [e for e in bridge_events if e.get("type") == "move"]
+        others = [e for e in bridge_events if e.get("type") not in ("move", "anchor", "segment_start", "segment_end")]
+
+        result: list[dict] = []
+        if moves:
+            total_dx = sum(int(m.get("x", 0)) for m in moves)
+            total_dy = sum(int(m.get("y", 0)) for m in moves)
+            perturbed_moves = planner.generate_path(total_dx, total_dy, moves)
+            result.extend(perturbed_moves)
+        result.extend(others)
+        return result
+
+    def _preprocess_events_point(self) -> list[dict]:
+        """点锚点模式预处理：相邻锚点之间的 move 事件施加路径扰动。
+
+        - 累加段内所有相对移动量得到总位移向量
+        - 用 PathPlanner 生成扰动路径
+        - 首尾点扰动量 = 0，保证最终位置精确一致
+        - 在每个锚点处插入 x=0,y=0 的 no-op move 占位时间戳
+        """
         from PathPlanner import PathPlanner
         planner = PathPlanner(strategy=self.path_strategy)
 

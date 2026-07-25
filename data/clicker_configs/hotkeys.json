@@ -3,5 +3,6 @@
     "start_recording": "F7",
     "stop_recording": "F8",
     "cancel_recording": "F10",
-    "mark_anchor": "F12"
+    "mark_anchor": "F12",
+    "anchor_mode": "point"
 }

@@ -17,7 +17,7 @@ import threading
 import argparse
 
 from InterceptionCore import InterceptionCore
-from ConfigManager import ConfigManager, FKEY_VK, FKEY_SCANCODE, DEFAULT_HOTKEYS
+from ConfigManager import ConfigManager, FKEY_VK, FKEY_SCANCODE, DEFAULT_HOTKEYS, DEFAULT_ANCHOR_MODE
 from ActionScript import (
     ActionScriptManager,
     ActionExecutor,
@@ -333,7 +333,9 @@ class ClickerManager:
             # 应用当前热键配置到录制器
             if hasattr(self, '_hotkeys'):
                 self._apply_hotkeys_to_recorder()
-            self.logger.info("InputRecorder 初始化完成")
+            # 应用锚点模式配置到录制器
+            self._recorder.anchor_mode = ConfigManager.load_anchor_mode()
+            self.logger.info("InputRecorder 初始化完成（锚点模式: %s）", self._recorder.anchor_mode)
         except Exception as e:
             self.logger.warning("InputRecorder 初始化失败（驱动未就绪？）：%s\n%s",
                                 e, traceback.format_exc())

@@ -288,6 +288,31 @@ class _DesktopWindow:
                                          command=self.on_rec_cancel, state="disabled")
         self.btn_rec_cancel.grid(row=0, column=2, sticky="ew", padx=(4, 0))
 
+        # 锚点模式选择
+        anchor_mode_frame = tk.Frame(rec_frame, bg=self.BG)
+        anchor_mode_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(anchor_mode_frame, text="锚点模式",
+                  font=("Segoe UI", 9, "bold"),
+                  foreground=self.TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+        self.anchor_mode_var = tk.StringVar(value="point")
+        self.anchor_mode_combo = ttk.Combobox(
+            anchor_mode_frame,
+            textvariable=self.anchor_mode_var,
+            values=["point", "segment"],
+            state="readonly",
+            width=20,
+            font=("Segoe UI", 10),
+        )
+        self.anchor_mode_combo.pack(fill="x")
+        self.anchor_mode_combo.bind("<<ComboboxSelected>>", self._on_anchor_mode_change)
+        # 锚点模式说明标签
+        self.anchor_mode_desc_var = tk.StringVar(value="")
+        ttk.Label(anchor_mode_frame, textvariable=self.anchor_mode_desc_var,
+                  foreground=self.TEXT_MUTED,
+                  font=("Segoe UI", 8), wraplength=280).pack(anchor="w", pady=(4, 0))
+        # 初始化锚点模式
+        self._init_anchor_mode()
+
         # ── 中栏：脚本列表（统一） ─────────────────
         center = ttk.LabelFrame(body, text="  脚本列表（双击执行）  ", padding=16)
         center.grid(row=0, column=1, sticky="nsew", padx=(0, 12))
@@ -734,6 +759,36 @@ class _DesktopWindow:
             self.btn_rec_cancel.configure(state="disabled")
             self.recording_entry.configure(state="normal")
             self.recording_indicator.configure(text="", foreground=self.DANGER)
+
+    # ── 锚点模式 ────────────────────────────────
+
+    _ANCHOR_MODE_DESC = {
+        "point": "点锚点：按 F12 标记锚点，锚点间鼠标路径拟人化扰动",
+        "segment": "段锚点：长按 F12 划定保护段，段内操作原样回放，段间路径扰动",
+    }
+
+    def _init_anchor_mode(self):
+        """初始化锚点模式（从配置加载）。"""
+        try:
+            mode = self.js_api.get_anchor_mode()
+            if mode not in ("point", "segment"):
+                mode = "point"
+        except Exception:
+            mode = "point"
+        self.anchor_mode_var.set(mode)
+        self.anchor_mode_desc_var.set(self._ANCHOR_MODE_DESC.get(mode, ""))
+
+    def _on_anchor_mode_change(self, event=None):
+        """锚点模式切换事件处理。"""
+        mode = self.anchor_mode_var.get()
+        try:
+            ok = self.js_api.set_anchor_mode(mode)
+            if ok:
+                self.anchor_mode_desc_var.set(self._ANCHOR_MODE_DESC.get(mode, ""))
+            else:
+                messagebox.showwarning("设置失败", "锚点模式保存失败")
+        except Exception as exc:
+            messagebox.showerror("设置失败", str(exc))
 
     # ── 刷新逻辑 ──────────────────────────────────
 
