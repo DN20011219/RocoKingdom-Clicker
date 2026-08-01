@@ -252,6 +252,55 @@ class Api:
         ConfigManager.save_config(self.manager.clicker.config, "default")
         return self.manager.clicker.config.move_mouse
 
+    # ---- 锚点模式 API ----
+
+    def get_anchor_mode(self) -> str:
+        """返回当前锚点模式：'point' 或 'segment'。"""
+        try:
+            return ConfigManager.load_anchor_mode()
+        except Exception:
+            return "point"
+
+    def set_anchor_mode(self, mode: str) -> bool:
+        """设置锚点模式并同步到录制器。返回是否成功。"""
+        try:
+            if mode not in ("point", "segment"):
+                return False
+            ok = ConfigManager.save_anchor_mode(mode)
+            if ok:
+                # 同步到录制器
+                rec = getattr(self.manager, "_recorder", None)
+                if rec:
+                    rec.anchor_mode = mode
+            return ok
+        except Exception:
+            return False
+
+    # ---- 路径扰动算法配置 API ----
+
+    def get_path_planner_config(self) -> dict:
+        """返回当前路径扰动算法配置。"""
+        try:
+            return ConfigManager.load_path_planner()
+        except Exception:
+            from ConfigManager import DEFAULT_PATH_PLANNER
+            return dict(DEFAULT_PATH_PLANNER)
+
+    def set_path_planner_config(self, config: dict) -> bool:
+        """保存路径扰动算法配置并同步到 PlaybackEngine。"""
+        try:
+            ok = ConfigManager.save_path_planner(config)
+            if ok:
+                # 同步到 PlaybackEngine
+                pb = getattr(self.manager, "_playback", None)
+                if pb:
+                    strategy = config.get("strategy", "fitts")
+                    if strategy in ("sine", "fitts", "neuromotor", "straight"):
+                        pb.path_strategy = strategy
+            return ok
+        except Exception:
+            return False
+
     def get_status(self):
         cfg = self.manager.clicker.config
         # 仅返回对用户有用的精简字段；在 move_mouse 为 True 时才包含位置信息
@@ -367,7 +416,7 @@ def start_gui():
     index_path = (WEB_DIR / 'index.html').as_uri()
 
     # run webview in main thread
-    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=1680, height=920)
+    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=1800, height=1300)
     webview.start()
 
     # webview 窗口关闭后，彻底清理所有后台线程和资源

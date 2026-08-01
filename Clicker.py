@@ -17,7 +17,7 @@ import threading
 import argparse
 
 from InterceptionCore import InterceptionCore
-from ConfigManager import ConfigManager, FKEY_VK, FKEY_SCANCODE, DEFAULT_HOTKEYS
+from ConfigManager import ConfigManager, FKEY_VK, FKEY_SCANCODE, DEFAULT_HOTKEYS, DEFAULT_ANCHOR_MODE
 from ActionScript import (
     ActionScriptManager,
     ActionExecutor,
@@ -333,7 +333,9 @@ class ClickerManager:
             # 应用当前热键配置到录制器
             if hasattr(self, '_hotkeys'):
                 self._apply_hotkeys_to_recorder()
-            self.logger.info("InputRecorder 初始化完成")
+            # 应用锚点模式配置到录制器
+            self._recorder.anchor_mode = ConfigManager.load_anchor_mode()
+            self.logger.info("InputRecorder 初始化完成（锚点模式: %s）", self._recorder.anchor_mode)
         except Exception as e:
             self.logger.warning("InputRecorder 初始化失败（驱动未就绪？）：%s\n%s",
                                 e, traceback.format_exc())
@@ -781,6 +783,15 @@ class ClickerManager:
                 self.logger.warning("check_compat 异常: %s", e)
 
         self._playback.speed = speed
+        # 应用路径扰动算法配置
+        try:
+            pp_cfg = ConfigManager.load_path_planner()
+            strategy = pp_cfg.get("strategy", "fitts")
+            if strategy in ("sine", "fitts", "neuromotor", "straight"):
+                self._playback.path_strategy = strategy
+            self._playback.path_planner_params = pp_cfg
+        except Exception:
+            pass
         # 设置循环回放参数
         self._playback.set_loop_config(count=loop_count, delay=loop_delay)
         loop_label = "无限" if loop_count == 0 else str(loop_count)

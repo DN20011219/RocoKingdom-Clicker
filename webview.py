@@ -105,7 +105,7 @@ class _DesktopWindow:
         self.root = tk.Tk()
         self.root.title(title)
         self.root.geometry(f"{width}x{height}")
-        self.root.minsize(1600, 860)
+        self.root.minsize(1720, 900)
         self.root.configure(bg=self.BG)
 
         self.status_var = tk.StringVar(value="准备就绪")
@@ -188,6 +188,23 @@ class _DesktopWindow:
         style.configure("Card.TLabel", background=self.CARD_BG,
                         foreground=self.TEXT)
         style.configure("Card.TFrame", background=self.CARD_BG)
+        # Combobox 深色主题样式
+        style.configure("TCombobox",
+                        fieldbackground=self.CARD_BG,
+                        background=self.CARD_BG,
+                        foreground=self.TEXT,
+                        arrowcolor=self.TEXT,
+                        borderwidth=1,
+                        relief="solid",
+                        padding=(6, 4))
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", self.CARD_BG),
+                                   ("disabled", "#2d3a4f")],
+                  foreground=[("readonly", self.TEXT),
+                              ("disabled", "#64748b")],
+                  arrowcolor=[("disabled", "#64748b")],
+                  bordercolor=[("focus", self.ACCENT),
+                               ("!focus", self.BORDER)])
 
         header = ttk.Frame(self.root, padding=(22, 18, 22, 8))
         header.pack(fill="x")
@@ -201,7 +218,7 @@ class _DesktopWindow:
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=3)
         body.columnconfigure(1, weight=5)
-        body.columnconfigure(2, weight=2)
+        body.columnconfigure(2, weight=3)
         body.rowconfigure(0, weight=1)
 
         # ── 左栏：状态与控制（内含三组） ─────────────────────────
@@ -287,6 +304,31 @@ class _DesktopWindow:
                                          style="Secondary.TButton",
                                          command=self.on_rec_cancel, state="disabled")
         self.btn_rec_cancel.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        # 锚点模式选择
+        anchor_mode_frame = tk.Frame(rec_frame, bg=self.BG)
+        anchor_mode_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(anchor_mode_frame, text="锚点模式",
+                  font=("Segoe UI", 9, "bold"),
+                  foreground=self.TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+        self.anchor_mode_var = tk.StringVar(value="point")
+        self.anchor_mode_combo = ttk.Combobox(
+            anchor_mode_frame,
+            textvariable=self.anchor_mode_var,
+            values=["point", "segment"],
+            state="readonly",
+            width=20,
+            font=("Segoe UI", 10),
+        )
+        self.anchor_mode_combo.pack(fill="x")
+        self.anchor_mode_combo.bind("<<ComboboxSelected>>", self._on_anchor_mode_change)
+        # 锚点模式说明标签
+        self.anchor_mode_desc_var = tk.StringVar(value="")
+        ttk.Label(anchor_mode_frame, textvariable=self.anchor_mode_desc_var,
+                  foreground=self.TEXT_MUTED,
+                  font=("Segoe UI", 8), wraplength=320).pack(anchor="w", pady=(4, 0))
+        # 初始化锚点模式
+        self._init_anchor_mode()
 
         # ── 中栏：脚本列表（统一） ─────────────────
         center = ttk.LabelFrame(body, text="  脚本列表（双击执行）  ", padding=16)
@@ -408,9 +450,12 @@ class _DesktopWindow:
         ttk.Button(script_btns2, text="↻ 刷新",
                    command=self.refresh_all).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-        # ── 右栏：快捷键设置 + 当前设置显示 ─────────
-        hotkey_panel = ttk.LabelFrame(body, text="  快捷键  ", padding=16)
-        hotkey_panel.grid(row=0, column=2, sticky="nsew", padx=(0, 0))
+        # ── 右栏：快捷键设置 + 路径扰动算法 ─────────
+        right = ttk.Frame(body)
+        right.grid(row=0, column=2, sticky="nsew", padx=(0, 0))
+
+        hotkey_panel = ttk.LabelFrame(right, text="  快捷键  ", padding=16)
+        hotkey_panel.pack(fill="x", pady=(0, 12))
         hotkey_panel.columnconfigure(0, weight=1)
 
         # ---- 快捷键设置区 ----
@@ -473,6 +518,66 @@ class _DesktopWindow:
                             padx=10, pady=2, bd=0)
             badge.pack(side="right")
             self._hotkey_badges[key_name] = badge
+
+        # ---- 路径扰动算法配置区 ----
+        path_panel = ttk.LabelFrame(right, text="  拟人化路径算法  ", padding=14)
+        path_panel.pack(fill="both", expand=True)
+
+        # 策略选择行（grid 布局避免遮挡）
+        strat_row = tk.Frame(path_panel, bg=self.BG)
+        strat_row.pack(fill="x", pady=(0, 6))
+        strat_row.columnconfigure(1, weight=1)
+        tk.Label(strat_row, text="策略", font=("Segoe UI", 9, "bold"),
+                 fg=self.TEXT, bg=self.BG).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self._pp_strategy_var = tk.StringVar(value="fitts")
+        self._pp_strategy_combo = ttk.Combobox(
+            strat_row, textvariable=self._pp_strategy_var,
+            values=["sine", "fitts", "neuromotor", "straight"],
+            state="readonly", width=14, font=("Segoe UI", 9, "bold"),
+        )
+        self._pp_strategy_combo.grid(row=0, column=1, sticky="e")
+        self._pp_strategy_combo.bind("<<ComboboxSelected>>", self._on_pp_strategy_change)
+
+        # 策略说明（紧凑单行）
+        self._pp_desc_var = tk.StringVar(value="")
+        tk.Label(path_panel, textvariable=self._pp_desc_var,
+                 font=("Segoe UI", 8), fg=self.TEXT_MUTED, bg=self.BG,
+                 wraplength=280, justify="left", anchor="w").pack(fill="x", pady=(0, 10))
+
+        # 参数输入区（grid 布局：标签 | 输入框 | 范围提示）
+        self._pp_params_frame = tk.Frame(path_panel, bg=self.BG)
+        self._pp_params_frame.pack(fill="x")
+
+        # 参数定义：{strategy: [(key, label, min, max, step), ...]}
+        self._pp_param_defs = {
+            "sine": [
+                ("sine_amplitude_px", "振幅 (px)", 1.0, 50.0, 1.0),
+                ("sine_frequency", "频率 (周期)", 1, 10, 1),
+            ],
+            "fitts": [
+                ("fitts_jitter_px", "微抖动 (px)", 0.5, 10.0, 0.5),
+                ("fitts_arc_px", "弧线偏移 (px)", 1.0, 30.0, 1.0),
+                ("fitts_overshoot_chance", "过冲概率", 0.0, 1.0, 0.05),
+                ("fitts_overshoot_px", "过冲距离 (px)", 1.0, 50.0, 1.0),
+            ],
+            "neuromotor": [
+                ("nm_lognormal_sigma", "速度剖面宽度", 0.4, 0.9, 0.05),
+                ("nm_perception_noise", "感知噪声", 0.01, 0.1, 0.01),
+                ("nm_entropy_alpha", "熵控强度", 0.0, 1.0, 0.1),
+                ("nm_lateral_drift", "横向漂移", 0.01, 0.2, 0.01),
+                ("nm_max_corrections", "最大修正次数", 1, 5, 1),
+            ],
+        }
+        self._pp_param_vars: dict[str, tk.StringVar] = {}
+        self._pp_param_widgets: list = []
+
+        # 保存按钮
+        ttk.Button(path_panel, text="💾 保存路径配置",
+                   style="Primary.TButton",
+                   command=self._on_save_path_planner).pack(fill="x", pady=(12, 0))
+
+        # 初始化路径扰动配置
+        self._init_path_planner()
 
         footer = ttk.Frame(self.root, padding=(22, 0, 22, 16))
         footer.pack(fill="x")
@@ -734,6 +839,159 @@ class _DesktopWindow:
             self.btn_rec_cancel.configure(state="disabled")
             self.recording_entry.configure(state="normal")
             self.recording_indicator.configure(text="", foreground=self.DANGER)
+
+    # ── 锚点模式 ────────────────────────────────
+
+    _ANCHOR_MODE_DESC = {
+        "point": "点锚点：按 F12 标记锚点，锚点间鼠标路径拟人化扰动",
+        "segment": "段锚点：长按 F12 划定保护段，段内操作原样回放，段间路径扰动",
+    }
+
+    def _init_anchor_mode(self):
+        """初始化锚点模式（从配置加载）。"""
+        try:
+            mode = self.js_api.get_anchor_mode()
+            if mode not in ("point", "segment"):
+                mode = "point"
+        except Exception:
+            mode = "point"
+        self.anchor_mode_var.set(mode)
+        self.anchor_mode_desc_var.set(self._ANCHOR_MODE_DESC.get(mode, ""))
+
+    def _on_anchor_mode_change(self, event=None):
+        """锚点模式切换事件处理。"""
+        mode = self.anchor_mode_var.get()
+        try:
+            ok = self.js_api.set_anchor_mode(mode)
+            if ok:
+                self.anchor_mode_desc_var.set(self._ANCHOR_MODE_DESC.get(mode, ""))
+            else:
+                messagebox.showwarning("设置失败", "锚点模式保存失败")
+        except Exception as exc:
+            messagebox.showerror("设置失败", str(exc))
+
+    # ── 路径扰动算法配置 ────────────────────────
+
+    _PP_STRATEGY_DESC = {
+        "sine": "正弦垂直扰动：平滑弧线，适合简单场景",
+        "fitts": "Fitts 拟人化：加减速 + 过冲 + 微抖动，更自然",
+        "neuromotor": "间歇预测控制：基于 2021-2025 顶会研究的前沿模型",
+        "straight": "纯直线：零扰动，用于调试桥接路径",
+    }
+
+    def _init_path_planner(self):
+        """初始化路径扰动配置（从配置加载）。"""
+        try:
+            config = self.js_api.get_path_planner_config()
+        except Exception:
+            config = {}
+        strategy = config.get("strategy", "fitts")
+        if strategy not in ("sine", "fitts", "neuromotor", "straight"):
+            strategy = "fitts"
+        self._pp_strategy_var.set(strategy)
+        self._pp_desc_var.set(self._PP_STRATEGY_DESC.get(strategy, ""))
+
+        # 初始化所有参数变量（保存全部策略的参数，切换时不丢失）
+        for strat, params in self._pp_param_defs.items():
+            for key, label, lo, hi, step in params:
+                val = config.get(key, lo)
+                self._pp_param_vars[key] = tk.StringVar(value=str(val))
+
+        self._rebuild_pp_params(strategy)
+
+    def _on_pp_strategy_change(self, event=None):
+        """策略切换时重建参数输入区并自动保存。"""
+        strategy = self._pp_strategy_var.get()
+        self._pp_desc_var.set(self._PP_STRATEGY_DESC.get(strategy, ""))
+        self._rebuild_pp_params(strategy)
+        # 策略切换自动保存，避免用户忘记点保存
+        self._on_save_path_planner(silent=True)
+
+    def _rebuild_pp_params(self, strategy: str):
+        """根据当前策略重建参数输入区（grid 布局，避免遮挡）。"""
+        # 清除旧 widget
+        for w in self._pp_param_widgets:
+            w.destroy()
+        self._pp_param_widgets.clear()
+
+        params = self._pp_param_defs.get(strategy, [])
+        if not params:
+            # straight 无参数，显示提示
+            hint = tk.Label(self._pp_params_frame, text="无参数（纯直线输出）",
+                            font=("Segoe UI", 9), fg=self.TEXT_MUTED, bg=self.BG)
+            hint.grid(row=0, column=0, columnspan=3, sticky="w", pady=4)
+            self._pp_param_widgets.append(hint)
+            return
+
+        # 表头
+        for col, (text, anchor) in enumerate([("参数", "w"), ("值", "e"), ("范围", "w")]):
+            lbl = tk.Label(self._pp_params_frame, text=text, font=("Segoe UI", 8),
+                           fg=self.TEXT_MUTED, bg=self.BG, anchor=anchor)
+            lbl.grid(row=0, column=col, sticky=anchor, padx=(0, 6), pady=(0, 4))
+            self._pp_param_widgets.append(lbl)
+
+        for row_idx, (key, label, lo, hi, step) in enumerate(params, start=1):
+            # 标签列
+            lbl = tk.Label(self._pp_params_frame, text=label, font=("Segoe UI", 9),
+                           fg=self.TEXT, bg=self.BG, anchor="w")
+            lbl.grid(row=row_idx, column=0, sticky="w", pady=3, padx=(0, 8))
+            self._pp_param_widgets.append(lbl)
+
+            # 输入框列
+            var = self._pp_param_vars.get(key)
+            if var is None:
+                var = tk.StringVar(value=str(lo))
+                self._pp_param_vars[key] = var
+            spin = tk.Spinbox(
+                self._pp_params_frame, from_=lo, to=hi, increment=step, width=7,
+                textvariable=var, font=("Segoe UI", 9, "bold"),
+                bg=self.CARD_BG, fg=self.TEXT, buttonbackground=self.ACCENT,
+                relief="flat", bd=0,
+            )
+            spin.grid(row=row_idx, column=1, sticky="e", pady=3)
+            self._pp_param_widgets.append(spin)
+
+            # 范围提示列
+            range_text = f"{lo}~{hi}"
+            range_lbl = tk.Label(self._pp_params_frame, text=range_text,
+                                 font=("Segoe UI", 8), fg=self.TEXT_MUTED, bg=self.BG)
+            range_lbl.grid(row=row_idx, column=2, sticky="w", padx=(8, 0), pady=3)
+            self._pp_param_widgets.append(range_lbl)
+
+        # 配置列权重：标签列自适应，输入框列固定
+        self._pp_params_frame.columnconfigure(0, weight=1)
+
+    def _on_save_path_planner(self, silent: bool = False):
+        """保存路径扰动配置（包含所有策略的参数，切换不丢失）。"""
+        strategy = self._pp_strategy_var.get()
+        config = {"strategy": strategy}
+
+        # 收集所有策略的参数（而非仅当前策略，避免切换后丢失）
+        for strat, params in self._pp_param_defs.items():
+            for key, label, lo, hi, step in params:
+                var = self._pp_param_vars.get(key)
+                if var is None:
+                    continue
+                try:
+                    val = float(var.get())
+                    val = max(lo, min(hi, val))
+                    if isinstance(step, int):
+                        val = int(val)
+                    config[key] = val
+                except (ValueError, tk.TclError):
+                    config[key] = lo
+
+        try:
+            ok = self.js_api.set_path_planner_config(config)
+            if ok:
+                if not silent:
+                    push_toast("✅ 路径扰动配置已保存", duration=2.5)
+            else:
+                if not silent:
+                    messagebox.showwarning("保存失败", "路径扰动配置保存失败")
+        except Exception as exc:
+            if not silent:
+                messagebox.showerror("保存失败", str(exc))
 
     # ── 刷新逻辑 ──────────────────────────────────
 

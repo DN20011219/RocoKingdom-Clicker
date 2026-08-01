@@ -63,11 +63,29 @@ run_clicker.bat
 | 暂停/继续 | F2 |
 | 开始录制 | F7 |
 | 停止录制并保存 | F8 |
-| 取消录制 | F9 |
+| 取消录制 | F10 |
+| 标记锚点（录制中） | F12 |
 
 在右栏快捷键面板的下拉框中修改后点击"保存热键设置"即可。配置持久化到 `data/clicker_configs/hotkeys.json`，重启后生效。不同功能不能使用同一个按键，冲突时会提示具体冲突按键。
 
 注意：热键监听使用全局键盘钩子（WH_KEYBOARD_LL），记录按键事件但不拦截原按键，因此游戏的原生按键功能仍然保留。
+
+### 鼠标锚点路径扰动
+
+> **前置要求**：Windows 设置 → 蓝牙和其他设备 → 鼠标 → **增强指针精度** 必须为 **关**。
+> 该选项开启时 Windows 会对鼠标增量施加非线性加速，导致路径扰动策略回放后的实际屏幕位移与原始录制不一致（锚点位置偏移）。关闭后 Interception 注入的相对增量将 1:1 对应屏幕像素移动，锚点精度才有保障。
+
+![增强指针精度-关](docs/pic/mouse_acceleration_off.png)
+
+录制过程中按锚点热键（默认 F12）可标记锚点位置。回放时鼠标会走不同的路径，但最终到达的位置与原始录制完全一致：
+
+- **每轮回放路径不同**：模拟真人操作的不确定性，降低被检测风险
+- **锚点位置零偏差**：每个锚点处的累积位移与原始录制精确一致，有数学保证
+- **三种路径策略可切换**：
+  - `sine`：正弦垂直扰动，平滑弧线
+  - `fitts`：拟人化路径（平滑低频噪声 + 弧线 + 过冲修正），更接近真人操作
+  - `neuromotor`：间歇预测控制模型（间歇子运动链 + 感知噪声重规划 + Lognormal速度脉冲 + 熵控随机），基于 CHI 2021 / 2024-2025 顶会研究
+- 锚点热键可在快捷键面板中自定义（F1-F12）
 
 ## 脚本系统
 - 脚本文件位于 `data/action_scripts/`，请按 `SCRIPT_RULES.md` 的格式编写动作序列。
@@ -185,12 +203,12 @@ run_clicker.bat
 ## 调试与常见问题
 - 如果在游戏中无法捕获热键，请以**管理员身份**重启 `run_clicker.vbs`（VBS 已支持弹出 UAC 提示以提升权限）。
 - 要查看详细日志，可在开发模式下运行 `python Clicker.py`（不加 `--gui`）以输出控制台日志。
-- 热键配置失效或想恢复默认：删除 `data/clicker_configs/hotkeys.json` 后重启程序即可恢复默认配置（F2 暂停/继续、F7 开始录制、F8 停止保存、F9 取消）。
+- 热键配置失效或想恢复默认：删除 `data/clicker_configs/hotkeys.json` 后重启程序即可恢复默认配置（F2 暂停/继续、F7 开始录制、F8 停止保存、F10 取消、F12 标记锚点）。
 - 修改热键后按钮 label 会自动更新（如 `⏸ 暂停 (F3)`）；若未更新，点击"保存热键设置"按钮触发刷新。
 
 ## 更新日志与贡献
-- 最新变更记录请见：[docs/changelog/2026-06-23.md](docs/changelog/2026-06-23.md)
-- 历史变更：[docs/changelog/2026-06-21.md](docs/changelog/2026-06-21.md)
+- 最新变更记录请见：[docs/changelog/2026-07-20.md](docs/changelog/2026-07-20.md)
+- 历史变更：[docs/changelog/2026-06-29.md](docs/changelog/2026-06-29.md) | [docs/changelog/2026-06-21.md](docs/changelog/2026-06-21.md)
 - 欢迎提交 issue 或 PR，描述你的使用场景与复现步骤。
 
 ---
@@ -204,6 +222,35 @@ run_clicker.bat
 群号：1105254591
 
 > 风险提示：本工具可能会违反游戏使用条款或遭受反作弊检测。请仅在你愿意承担风险的情况下使用。
+
+## 致谢与参考文献
+
+本项目的 `neuromotor` 拟人化路径生成策略基于以下 2021-2025 顶会前沿研究实现：
+
+1. **Do, S., Chang, M., & Lee, B. (2021).** A Simulation Model of Intermittently Controlled Point-and-Click Behaviour. *CHI '21*. [DOI](https://doi.org/10.1145/3411764.3445514)
+   — BUMP 模型：间歇控制 + 弹道子运动 + 感知更新
+
+2. **Klar, M., et al. (2025).** An Active Inference Model of Mouse Point-and-Click Behaviour. *arXiv:2510.14611*. [Link](https://arxiv.org/abs/2510.14611)
+   — 主动推理 + 感知延迟 + 不确定性驱动修正
+
+3. **Rudakov, E., et al. (2025).** SSSUMO: Real-Time Semi-Supervised Submovement Decomposition. *arXiv:2507.08028*. [Link](https://arxiv.org/abs/2507.08028)
+   — Lognormal 速度脉冲 + 2-3 Hz 子运动节律
+
+4. **Liu, J., et al. (2024).** DMTG: A Human-Like Mouse Trajectory Generation Bot Based on Entropy-Controlled Diffusion Networks. *arXiv:2410.18233*. [Link](https://arxiv.org/abs/2410.18233)
+   — 熵控扩散模型，相位自适应随机性
+
+经典理论基础：
+
+- Flash & Hogan (1985): Minimum Jerk 模型, *J. Neuroscience* 5(7)
+- Harris & Wolpert (1998): 信号依赖噪声, *Nature* 394
+- Plamondon (1995): Sigma-Lognormal 运动学, *Biol. Cybernetics* 72(4)
+
+参考开源实现：
+
+- [AIF-Pointing](https://github.com/mkl4r/AIF-Pointing) — 主动推理鼠标指向模拟 (Python/JAX)
+- [mouse-ai](https://github.com/SaluRamos/mouse-ai) — DMTG 扩散模型鼠标轨迹 (Python)
+- [SigmaDrift](https://github.com/ck0i/SigmaDrift) — 生物力学鼠标轨迹生成 (C++20)
+- [WindMouse](https://ben.land/post/2021/04/25/windmouse-human-mouse-movement/) — 物理模拟拟人鼠标移动 (GPLv3)
 
 ## 许可协议 (Licensing)
 

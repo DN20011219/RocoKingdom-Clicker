@@ -34,6 +34,28 @@ DEFAULT_HOTKEYS = {
     "mark_anchor": "F12",       # 录制时标记锚点
 }
 
+# 默认锚点模式："point"（点锚点，路径扰动）或 "segment"（段锚点，区间保护）
+DEFAULT_ANCHOR_MODE = "point"
+
+# 默认路径扰动配置
+DEFAULT_PATH_PLANNER = {
+    "strategy": "fitts",
+    # sine 策略参数
+    "sine_amplitude_px": 10.0,
+    "sine_frequency": 2,
+    # fitts 策略参数
+    "fitts_jitter_px": 2.0,
+    "fitts_arc_px": 8.0,
+    "fitts_overshoot_chance": 0.3,
+    "fitts_overshoot_px": 15.0,
+    # neuromotor 策略参数
+    "nm_lognormal_sigma": 0.65,
+    "nm_perception_noise": 0.03,
+    "nm_entropy_alpha": 0.6,
+    "nm_lateral_drift": 0.06,
+    "nm_max_corrections": 2,
+}
+
 # 热键显示名称
 HOTKEY_LABELS = {
     "pause_resume": "暂停/继续",
@@ -298,4 +320,82 @@ class ConfigManager:
             return True
         except Exception as e:
             cls.logger.error("保存热键配置失败: %s", e)
+            return False
+
+    # ---- 锚点模式配置 ----
+
+    @classmethod
+    def load_anchor_mode(cls) -> str:
+        """加载锚点模式配置，返回 'point' 或 'segment'。"""
+        cls.ensure_config_dir()
+        if cls.HOTKEYS_FILE.exists():
+            try:
+                with open(cls.HOTKEYS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                mode = data.get("anchor_mode", DEFAULT_ANCHOR_MODE)
+                if mode in ("point", "segment"):
+                    return mode
+            except Exception as e:
+                cls.logger.warning("加载锚点模式失败: %s，使用默认配置", e)
+        return DEFAULT_ANCHOR_MODE
+
+    @classmethod
+    def save_anchor_mode(cls, mode: str) -> bool:
+        """保存锚点模式配置到 hotkeys.json。"""
+        if mode not in ("point", "segment"):
+            cls.logger.warning("无效的锚点模式: %s", mode)
+            return False
+        cls.ensure_config_dir()
+        try:
+            # 读取现有配置，追加/更新 anchor_mode 字段
+            data = {}
+            if cls.HOTKEYS_FILE.exists():
+                with open(cls.HOTKEYS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            data["anchor_mode"] = mode
+            with open(cls.HOTKEYS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            cls.logger.info("锚点模式已保存: %s", mode)
+            return True
+        except Exception as e:
+            cls.logger.error("保存锚点模式失败: %s", e)
+            return False
+
+    # ---- 路径扰动算法配置 ----
+
+    PATH_PLANNER_FILE = CONFIG_DIR / "path_planner.json"
+
+    @classmethod
+    def load_path_planner(cls) -> dict:
+        """加载路径扰动算法配置，返回完整参数字典。"""
+        cls.ensure_config_dir()
+        config = dict(DEFAULT_PATH_PLANNER)
+        if cls.PATH_PLANNER_FILE.exists():
+            try:
+                with open(cls.PATH_PLANNER_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                for key in DEFAULT_PATH_PLANNER:
+                    if key in data:
+                        config[key] = data[key]
+                cls.logger.info("路径扰动配置已从 %s 加载", cls.PATH_PLANNER_FILE)
+            except Exception as e:
+                cls.logger.warning("加载路径扰动配置失败: %s，使用默认配置", e)
+        return config
+
+    @classmethod
+    def save_path_planner(cls, config: dict) -> bool:
+        """保存路径扰动算法配置到文件。"""
+        cls.ensure_config_dir()
+        try:
+            # 只保存已知字段
+            data = {}
+            for key in DEFAULT_PATH_PLANNER:
+                if key in config:
+                    data[key] = config[key]
+            with open(cls.PATH_PLANNER_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            cls.logger.info("路径扰动配置已保存到 %s", cls.PATH_PLANNER_FILE)
+            return True
+        except Exception as e:
+            cls.logger.error("保存路径扰动配置失败: %s", e)
             return False

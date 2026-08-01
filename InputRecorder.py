@@ -120,7 +120,27 @@ class AnchorEvent:
         return {"t": round(self.t, 3), "type": self.type}
 
 
-RecordingEvent = MoveEvent | ClickEvent | KeyEvent | AnchorEvent
+@dataclass
+class SegmentStartEvent:
+    """段锚点起始事件。长按锚点键按下时插入，标记保护段开始。"""
+    t: float
+    type: str = "segment_start"
+
+    def to_dict(self) -> dict:
+        return {"t": round(self.t, 3), "type": self.type}
+
+
+@dataclass
+class SegmentEndEvent:
+    """段锚点结束事件。松开锚点键时插入，标记保护段结束。"""
+    t: float
+    type: str = "segment_end"
+
+    def to_dict(self) -> dict:
+        return {"t": round(self.t, 3), "type": self.type}
+
+
+RecordingEvent = MoveEvent | ClickEvent | KeyEvent | AnchorEvent | SegmentStartEvent | SegmentEndEvent
 
 
 # ---- 调试浮窗 -----------------------------------------------------------------
@@ -245,6 +265,11 @@ class InputRecorder:
         self._overlay = DebugOverlay()
         self._anchor_count: int = 0  # 已标记的锚点数量
 
+        # 锚点模式：'point'（点锚点，路径扰动）或 'segment'（段锚点，区间保护）
+        self.anchor_mode: str = "point"
+        self._in_segment: bool = False  # 段锚点模式下是否正在保护段内
+        self._segment_count: int = 0  # 已标记的段数量
+
     def set_hotkeys(self, start: str = "F7", stop: str = "F8", cancel: str = "F9",
                     anchor: str = "F12") -> bool:
         """设置录制热键（F1-F12）。
@@ -297,10 +322,18 @@ class InputRecorder:
             self._recording = True
             self._last_move_t = -1.0
             self._anchor_count = 0
+            self._segment_count = 0
+            self._in_segment = False
             self._start_info_ms = None  # 延迟初始化：首个事件的硬件时间戳
-            # ★ 自动插入起始锚点（t=0），确保第一段也能被扰动处理
-            self._anchor_count += 1
-            self._events.append(AnchorEvent(t=0.0))
+            # 点锚点模式：自动插入起始锚点（t=0），确保第一段也能被扰动处理
+            if self.anchor_mode == "point":
+                self._anchor_count += 1
+                self._events.append(AnchorEvent(t=0.0))
+            # 段锚点模式：自动插入起始零长度段（t=0），标记初始鼠标位置为保护点
+            elif self.anchor_mode == "segment":
+                self._segment_count += 1
+                self._events.append(SegmentStartEvent(t=0.0))
+                self._events.append(SegmentEndEvent(t=0.0))
 
         self.logger.info(
             "录制开始（初始鼠标坐标: %d, %d）",
@@ -351,6 +384,12 @@ class InputRecorder:
             return []
 
         with self._lock:
+            # 段锚点模式：如果段未关闭（用户按住锚点键时按了停止键），自动补 segment_end
+            if self.anchor_mode == "segment" and self._in_segment:
+                t_now = time.perf_counter() - self._start_time
+                self._events.append(SegmentEndEvent(t=t_now))
+                self._in_segment = False
+                self.logger.info("录制停止时自动关闭未结束的段")
             self._recording = False
             events = [e.to_dict() for e in self._events]
 
@@ -395,6 +434,8 @@ class InputRecorder:
                 "start_cursor_x": getattr(self, "_start_cursor_x", 0),
                 "start_cursor_y": getattr(self, "_start_cursor_y", 0),
                 "anchors": self._anchor_count,
+                "anchor_mode": self.anchor_mode,
+                "segments": self._segment_count,
             }
 
             payload = {"meta": meta, "events": events}
@@ -583,23 +624,57 @@ class InputRecorder:
             # ★ 检测锚点标记热键（扫描码可配置，默认 F12）
             # down 和 up 都要吞掉，避免泄漏到录制数据中
             if scan_code == self.HOTKEY_ANCHOR:
-                if action == "down":
-                    self._anchor_count += 1
-                    with self._lock:
-                        self._events.append(AnchorEvent(t=t))
-                    self._overlay.log_event(
-                        f"[{t:6.2f}s] 📌 锚点 #{self._anchor_count}"
-                    )
-                    self.logger.info(
-                        "锚点 #%d 已标记 at t=%.3f",
-                        self._anchor_count, t,
-                    )
-                    # 直接弹 toast（不受 0.5s 节流限制）
-                    try:
-                        if self.on_anchor:
-                            self.on_anchor(self._anchor_count)
-                    except Exception as e:
-                        self.logger.error("on_anchor 回调异常: %s", e)
+                if self.anchor_mode == "segment":
+                    # ---- 段锚点模式 ----
+                    if action == "down" and not self._in_segment:
+                        # 只有在不在段内时才创建新段（忽略键盘自动重复的 down 事件）
+                        self._segment_count += 1
+                        self._in_segment = True
+                        with self._lock:
+                            self._events.append(SegmentStartEvent(t=t))
+                        self._overlay.log_event(
+                            f"[{t:6.2f}s] 📌 段 #{self._segment_count} 开始"
+                        )
+                        self.logger.info(
+                            "段 #%d 开始 at t=%.3f",
+                            self._segment_count, t,
+                        )
+                        try:
+                            if self.on_anchor:
+                                self.on_anchor(self._segment_count)
+                        except Exception as e:
+                            self.logger.error("on_anchor 回调异常: %s", e)
+                    elif action == "up" and self._in_segment:
+                        # 只有在段内时才关闭段（忽略多余的 up 事件）
+                        self._in_segment = False
+                        with self._lock:
+                            self._events.append(SegmentEndEvent(t=t))
+                        self._overlay.log_event(
+                            f"[{t:6.2f}s] 📌 段 #{self._segment_count} 结束"
+                        )
+                        self.logger.info(
+                            "段 #%d 结束 at t=%.3f",
+                            self._segment_count, t,
+                        )
+                else:
+                    # ---- 点锚点模式（原有行为） ----
+                    if action == "down":
+                        self._anchor_count += 1
+                        with self._lock:
+                            self._events.append(AnchorEvent(t=t))
+                        self._overlay.log_event(
+                            f"[{t:6.2f}s] 📌 锚点 #{self._anchor_count}"
+                        )
+                        self.logger.info(
+                            "锚点 #%d 已标记 at t=%.3f",
+                            self._anchor_count, t,
+                        )
+                        # 直接弹 toast（不受 0.5s 节流限制）
+                        try:
+                            if self.on_anchor:
+                                self.on_anchor(self._anchor_count)
+                        except Exception as e:
+                            self.logger.error("on_anchor 回调异常: %s", e)
                 # down 和 up 都不转发给系统（吞掉此按键）
                 return
 
