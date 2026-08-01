@@ -783,6 +783,15 @@ class ClickerManager:
                 self.logger.warning("check_compat 异常: %s", e)
 
         self._playback.speed = speed
+        # 应用路径扰动算法配置
+        try:
+            pp_cfg = ConfigManager.load_path_planner()
+            strategy = pp_cfg.get("strategy", "fitts")
+            if strategy in ("sine", "fitts", "neuromotor", "straight"):
+                self._playback.path_strategy = strategy
+            self._playback.path_planner_params = pp_cfg
+        except Exception:
+            pass
         # 设置循环回放参数
         self._playback.set_loop_config(count=loop_count, delay=loop_delay)
         loop_label = "无限" if loop_count == 0 else str(loop_count)

@@ -4,5 +4,5 @@
     "stop_recording": "F8",
     "cancel_recording": "F10",
     "mark_anchor": "F12",
-    "anchor_mode": "point"
+    "anchor_mode": "segment"
 }

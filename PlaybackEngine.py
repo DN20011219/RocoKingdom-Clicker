@@ -86,8 +86,10 @@ class PlaybackEngine:
         self._anchors: list[dict] = []
         # 预处理后的事件列表（每轮回放前重新生成）
         self._processed_events: list[dict] = []
-        # 路径扰动策略：'sine' (正弦) 或 'fitts' (拟人化)
+        # 路径扰动策略：'sine' (正弦) / 'fitts' (拟人化) / 'neuromotor' (间歇预测控制)
         self.path_strategy: str = "fitts"
+        # 路径扰动算法参数（由外部配置注入，传给 PathPlanner）
+        self.path_planner_params: dict = {}
         # 锚点模式：'point'（点锚点）或 'segment'（段锚点）
         self.anchor_mode: str = "point"
         # 段锚点边界列表：[{"start_t", "end_t", "start_idx", "end_idx"}, ...]
@@ -102,6 +104,18 @@ class PlaybackEngine:
         self._current_loop: int = 0
 
     # ---- 脚本加载 ----------------------------------------------------------------
+
+    def _planner_kwargs(self) -> dict:
+        """从 path_planner_params 提取 PathPlanner 构造参数（过滤无效键）。"""
+        valid_keys = {
+            "sine_amplitude_px", "sine_frequency",
+            "fitts_jitter_px", "fitts_arc_px",
+            "fitts_overshoot_chance", "fitts_overshoot_px",
+            "nm_lognormal_sigma", "nm_perception_noise",
+            "nm_entropy_alpha", "nm_lateral_drift", "nm_max_corrections",
+        }
+        return {k: v for k, v in self.path_planner_params.items() if k in valid_keys}
+
     def load(self, filepath: str | Path) -> bool:
         """加载 JSON 脚本文件。"""
         try:
@@ -194,7 +208,7 @@ class PlaybackEngine:
         - 桥接（end_idx+1 ~ 下一个 start_idx-1）：move 事件扰动，其他事件保留
         """
         from PathPlanner import PathPlanner
-        planner = PathPlanner(strategy=self.path_strategy)
+        planner = PathPlanner(strategy=self.path_strategy, **self._planner_kwargs())
 
         processed: list[dict] = []
         prev_end_idx = 0  # 上一个段结束后的下一个索引
@@ -226,19 +240,71 @@ class PlaybackEngine:
         )
         return processed
 
-    def _perturb_bridge(self, bridge_events: list[dict], planner) -> list[dict]:
-        """对桥接段的事件进行扰动处理：move 事件用 PathPlanner，其他事件原样保留。"""
-        # 分离 move 和非 move 事件
-        moves = [e for e in bridge_events if e.get("type") == "move"]
-        others = [e for e in bridge_events if e.get("type") not in ("move", "anchor", "segment_start", "segment_end")]
+    def _build_straight_base(self, moves: list[dict], total_dx: int, total_dy: int) -> list[dict]:
+        """根据总位移构建直线基准路径（均匀插值），丢弃原始轨迹形状。"""
+        n = len(moves)
+        straight: list[dict] = []
+        prev_cum_x, prev_cum_y = 0, 0
+        for i, m in enumerate(moves):
+            target_cum_x = round(total_dx * (i + 1) / n)
+            target_cum_y = round(total_dy * (i + 1) / n)
+            straight.append({
+                "t": m.get("t", 0.0),
+                "type": "move",
+                "x": target_cum_x - prev_cum_x,
+                "y": target_cum_y - prev_cum_y,
+            })
+            prev_cum_x, prev_cum_y = target_cum_x, target_cum_y
+        return straight
 
+    def _perturb_bridge(self, bridge_events: list[dict], planner) -> list[dict]:
+        """桥接段路径重新生成：完全丢弃原始轨迹，生成全新路径。
+
+        核心逻辑：
+        1. 累加原始 move 事件得到总位移向量 (total_dx, total_dy)
+        2. 构建「直线基准路径」（均匀插值），步数和时间戳与原始一致
+        3. PathPlanner 对直线路径施加随机扰动 → 每次回放都不同的全新轨迹
+        4. 非 move 事件（click/key）保持原始时序插回
+        """
+        if not bridge_events:
+            return []
+
+        # 分离 move 事件
+        moves: list[dict] = [e for e in bridge_events if e.get("type") == "move"]
+
+        if not moves:
+            return [e for e in bridge_events
+                    if e.get("type") not in ("anchor", "segment_start", "segment_end")]
+
+        # 计算总位移
+        total_dx = sum(int(m.get("x", 0)) for m in moves)
+        total_dy = sum(int(m.get("y", 0)) for m in moves)
+        n = len(moves)
+
+        # 构建直线基准路径，丢弃原始轨迹形状
+        straight_moves = self._build_straight_base(moves, total_dx, total_dy)
+
+        # PathPlanner 对直线路径施加随机扰动 → 全新轨迹（每次回放不同）
+        perturbed_moves = planner.generate_path(total_dx, total_dy, straight_moves)
+
+        self.logger.debug(
+            "桥接路径重新生成: %d 步, 总位移=(%d, %d), 距离=%.1f px",
+            n, total_dx, total_dy,
+            (total_dx ** 2 + total_dy ** 2) ** 0.5,
+        )
+
+        # 回填：将新生成的 move 按原始位置插回，保持与非 move 事件的时序
+        perturbed_idx = 0
         result: list[dict] = []
-        if moves:
-            total_dx = sum(int(m.get("x", 0)) for m in moves)
-            total_dy = sum(int(m.get("y", 0)) for m in moves)
-            perturbed_moves = planner.generate_path(total_dx, total_dy, moves)
-            result.extend(perturbed_moves)
-        result.extend(others)
+        for e in bridge_events:
+            ev_type = e.get("type", "")
+            if ev_type in ("anchor", "segment_start", "segment_end"):
+                continue
+            if ev_type == "move" and perturbed_idx < len(perturbed_moves):
+                result.append(perturbed_moves[perturbed_idx])
+                perturbed_idx += 1
+            else:
+                result.append(e)
         return result
 
     def _preprocess_events_point(self) -> list[dict]:
@@ -250,7 +316,7 @@ class PlaybackEngine:
         - 在每个锚点处插入 x=0,y=0 的 no-op move 占位时间戳
         """
         from PathPlanner import PathPlanner
-        planner = PathPlanner(strategy=self.path_strategy)
+        planner = PathPlanner(strategy=self.path_strategy, **self._planner_kwargs())
 
         # 判断是否为泄漏的 F12 键事件（旧版录制未吞掉 F12 up）
         def _is_leaked_f12(ev: dict) -> bool:

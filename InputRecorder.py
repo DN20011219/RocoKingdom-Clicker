@@ -326,10 +326,14 @@ class InputRecorder:
             self._in_segment = False
             self._start_info_ms = None  # 延迟初始化：首个事件的硬件时间戳
             # 点锚点模式：自动插入起始锚点（t=0），确保第一段也能被扰动处理
-            # 段锚点模式：不插入（录制开始自然处于"桥接"状态）
             if self.anchor_mode == "point":
                 self._anchor_count += 1
                 self._events.append(AnchorEvent(t=0.0))
+            # 段锚点模式：自动插入起始零长度段（t=0），标记初始鼠标位置为保护点
+            elif self.anchor_mode == "segment":
+                self._segment_count += 1
+                self._events.append(SegmentStartEvent(t=0.0))
+                self._events.append(SegmentEndEvent(t=0.0))
 
         self.logger.info(
             "录制开始（初始鼠标坐标: %d, %d）",
@@ -622,7 +626,8 @@ class InputRecorder:
             if scan_code == self.HOTKEY_ANCHOR:
                 if self.anchor_mode == "segment":
                     # ---- 段锚点模式 ----
-                    if action == "down":
+                    if action == "down" and not self._in_segment:
+                        # 只有在不在段内时才创建新段（忽略键盘自动重复的 down 事件）
                         self._segment_count += 1
                         self._in_segment = True
                         with self._lock:
@@ -639,7 +644,8 @@ class InputRecorder:
                                 self.on_anchor(self._segment_count)
                         except Exception as e:
                             self.logger.error("on_anchor 回调异常: %s", e)
-                    elif action == "up":
+                    elif action == "up" and self._in_segment:
+                        # 只有在段内时才关闭段（忽略多余的 up 事件）
                         self._in_segment = False
                         with self._lock:
                             self._events.append(SegmentEndEvent(t=t))

@@ -1,0 +1,14 @@
+{
+    "strategy": "straight",
+    "sine_amplitude_px": 10.0,
+    "sine_frequency": 2,
+    "fitts_jitter_px": 2.0,
+    "fitts_arc_px": 8.0,
+    "fitts_overshoot_chance": 0.3,
+    "fitts_overshoot_px": 15.0,
+    "nm_lognormal_sigma": 0.65,
+    "nm_perception_noise": 0.03,
+    "nm_entropy_alpha": 0.6,
+    "nm_lateral_drift": 0.06,
+    "nm_max_corrections": 2
+}
