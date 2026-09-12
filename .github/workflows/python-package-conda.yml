@@ -1,0 +1,90 @@
+name: Build & Package (Windows)
+
+# ---------------------------------------------------------------------------
+# 自动调用打包脚本 build_release.bat（其内部再执行 _release_copy.ps1），
+# 产出发布包：release/RocoKingdom_Clicker.zip
+#
+# 为什么必须使用 windows runner：
+#   * 本项目是 Windows 桌面程序（Interception 驱动 + tkinter GUI + ctypes.windll）
+#   * PyInstaller 不支持跨平台交叉编译，只能在 Windows 上生成 .exe
+#
+# 依赖说明：运行期仅依赖 Python 标准库（见 requirements.txt），因此无需 conda；
+#           构建期只需安装 PyInstaller。
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write            # 打 tag 时用内置 GITHUB_TOKEN 创建/更新 Release
+
+concurrency:
+  group: build-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Windows package
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pyinstaller>=6.0"
+
+      # build_release.bat 会自行定位 Python、安装 PyInstaller、运行 PyInstaller，
+      # 并调用 _release_copy.ps1 复制 data/docs/驱动/许可证，最终生成 release 压缩包。
+      - name: Run packaging script (build_release.bat)
+        shell: cmd
+        run: |
+          call build_release.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $zip = 'release/RocoKingdom_Clicker.zip'
+          $exe = 'dist/RocoKingdom_Clicker/RocoKingdom_Clicker.exe'
+          if (-not (Test-Path $exe)) { throw "EXE missing: $exe" }
+          if (-not (Test-Path $zip)) { throw "ZIP missing: $zip" }
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 2)
+          Write-Host "Build OK -> $zip ($mb MB)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RocoKingdom_Clicker-windows
+          path: release/RocoKingdom_Clicker.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      # 仅在推送 v* 标签时创建/更新 GitHub Release，并把 zip 作为发布附件上传。
+      - name: Publish GitHub Release (tag v* only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag   = '${{ github.ref_name }}'
+          $asset = 'release/RocoKingdom_Clicker.zip'
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists -> uploading asset (clobber)"
+            gh release upload $tag $asset --clobber
+          } else {
+            Write-Host "Creating release $tag"
+            gh release create $tag $asset --title $tag --generate-notes
+          }
