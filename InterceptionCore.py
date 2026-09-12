@@ -24,6 +24,10 @@ except Exception:
 SW = user32.GetSystemMetrics(0)
 SH = user32.GetSystemMetrics(1)
 
+# 设备号布局（interception.h）：键盘 1~10，鼠标 11~20
+INTERCEPTION_MAX_KEYBOARD = 10
+INTERCEPTION_MAX_MOUSE = 10
+
 
 class InterceptionMouseStroke(ctypes.Structure):
     """Interception 鼠标 stroke 结构体"""
@@ -44,6 +48,46 @@ class InterceptionKeyStroke(ctypes.Structure):
         ("state", ctypes.c_ushort),
         ("information", ctypes.c_uint),
     ]
+
+
+def _find_attached_device(lib, ctx, first: int, last: int) -> Optional[int]:
+    """返回 [first, last] 中第一个真正挂载了硬件的设备号，全空则返回 None。
+
+    interception_is_keyboard()/is_mouse() 只判断设备号是否落在范围内，空槽位同样
+    返回真；只有 interception_get_hardware_id() 能反映槽位是否真的挂着设备。往空
+    槽位 send 不抛异常、只返回 0，表现为点击完全无效且无任何报错。
+    """
+    try:
+        lib.interception_get_hardware_id.restype = ctypes.c_uint
+        lib.interception_get_hardware_id.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t,
+        ]
+    except Exception:
+        # DLL 未导出该函数时退回范围起点，保持旧行为
+        return first
+
+    for device in range(first, last + 1):
+        hardware_id = ctypes.create_unicode_buffer(500)
+        try:
+            if lib.interception_get_hardware_id(ctx, device, hardware_id, 500):
+                return device
+        except Exception:
+            continue
+    return None
+
+
+def find_mouse_device(lib, ctx) -> Optional[int]:
+    """枚举鼠标槽位（11~20），返回第一个挂载了硬件的设备号。"""
+    return _find_attached_device(
+        lib, ctx,
+        INTERCEPTION_MAX_KEYBOARD + 1,
+        INTERCEPTION_MAX_KEYBOARD + INTERCEPTION_MAX_MOUSE,
+    )
+
+
+def find_keyboard_device(lib, ctx) -> Optional[int]:
+    """枚举键盘槽位（1~10），返回第一个挂载了硬件的设备号。"""
+    return _find_attached_device(lib, ctx, 1, INTERCEPTION_MAX_KEYBOARD)
 
 
 class ClickerConfig:
@@ -102,7 +146,11 @@ class InterceptionCore:
 
     def is_ready(self) -> bool:
         """返回 Interception 驱动/DLL 是否已可用。"""
-        return self._lib is not None and self._ctx is not None
+        return (
+            self._lib is not None
+            and self._ctx is not None
+            and self._device is not None
+        )
 
     def _wait_until_resumed(self, poll_interval: float = 0.1) -> bool:
         """等待恢复运行，返回 False 表示已停止。"""
@@ -262,8 +310,15 @@ class InterceptionCore:
                 )
                 return
 
-            # 获取虚拟鼠标设备（INTERCEPTION_MAX_KEYBOARD=10, INTERCEPTION_MOUSE(0) = 11）
-            self._device = 11
+            # 鼠标设备号不能硬编码成 11（INTERCEPTION_MOUSE(0)）：槽位按设备接入
+            # 顺序分配，11 号完全可能是空的，必须枚举出真正挂着硬件的那一个
+            self._device = find_mouse_device(lib, self._ctx)
+            if self._device is None:
+                self.init_error = (
+                    "Interception 驱动已就绪，但没有发现任何鼠标设备（槽位 11~20 全为空）。\n\n"
+                    "请确认鼠标/触摸板已连接并被系统识别，然后重新运行本程序。"
+                )
+                return
             self.logger.info(f"成功加载 Interception 库 ({arch}): {used_path}")
             self.logger.info("Interception 上下文已创建，设备 ID: %d", self._device)
 
