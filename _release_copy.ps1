@@ -18,12 +18,21 @@ Write-Host "Copying top-level files (run scripts, README, LICENSE, GPL, LGPL)...
     }
 }
 
-Write-Host "Copying data/ folder..."
+Write-Host "Copying data/ folder (excluding runtime data)..."
 $dataSrc = Join-Path $Root 'data'
 $dataDst = Join-Path $Dist 'data'
+# 运行时数据不随包发布，否则会把开发机的日志/配置塞进发布包并覆盖用户自己的配置：
+#   clicker.log       —— 开发机运行日志，含本机绝对路径，无法用于判断用户是否运行过
+#   clicker_configs\  —— 开发机热键/坐标等配置；程序首次运行会由 ConfigManager 用默认值自动重建
+# 仅发布 action_scripts\ 等静态示例资源。
+$dataExclude = @('clicker.log', 'clicker_configs')
 if (Test-Path $dataSrc) {
     if (-not (Test-Path $dataDst)) { New-Item -ItemType Directory -Path $dataDst -Force | Out-Null }
-    Copy-Item -Path (Join-Path $dataSrc '*') -Destination $dataDst -Recurse -Force
+    Get-ChildItem -Path $dataSrc -Force | Where-Object { $dataExclude -notcontains $_.Name } | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination $dataDst -Recurse -Force
+    }
+} else {
+    Write-Host "  (skipped: data/ not found)"
 }
 
 Write-Host "Copying interception.dll..."
