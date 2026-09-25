@@ -275,19 +275,31 @@ class ActionExecutor:
         """初始化 Interception"""
         try:
             import os
+            import platform
+            # 与 InterceptionCore 保持一致的多路径搜索：只找 __file__ 同目录和 CWD
+            # 两条路径时，源码模式下（仓库根目录没有 interception.dll）会全部落空，
+            # 导致 self._lib=None、动作脚本的鼠标和键盘静默失效。补上 third\ 回退，
+            # 并用 isfile 预筛，避免对不存在的相对路径盲目 CDLL。
+            arch = "x64" if platform.architecture()[0] == "64bit" else "x86"
+            project_root = os.path.dirname(os.path.abspath(__file__))
             dll_paths = [
-                os.path.join(os.path.dirname(__file__), "interception.dll"),
+                os.path.join(project_root, "interception.dll"),
+                os.path.join(project_root, "third", "Interception", "library", arch, "interception.dll"),
+                os.path.join(project_root, "third", "Interception", "library", "x64", "interception.dll"),
+                os.path.join(project_root, "third", "Interception", "library", "x86", "interception.dll"),
                 "interception.dll",
             ]
             
             lib = None
             for path in dll_paths:
+                if not path or not os.path.isfile(path):
+                    continue
                 try:
                     lib = ctypes.CDLL(path)
                     self.logger.info(f"加载 Interception: {path}")
                     break
                 except Exception:
-                    pass
+                    continue
             
             if lib is None:
                 raise OSError("无法加载 interception.dll")

@@ -31,6 +31,12 @@ if not exist "%INSTALLER%" (
     echo.
 )
 
+rem ---- 关于驱动预检 ----
+rem 能否使用驱动，取决于“能否创建上下文并注入/读取”，只有加载 DLL 后才能判断。
+rem bat 无法可靠预检：Interception 并不注册名为 interception 的服务（它以 keyboard.sys /
+rem mouse.sys 类过滤驱动形式安装），sc query interception 会在驱动正常时也返回 1060（假阴性）。
+rem 权威检测在程序启动时进行：Clicker.py 的 probe.is_ready() 失败会弹框提示安装驱动。
+
 title RocoKingdom Clicker
 color 0A
 
@@ -56,7 +62,9 @@ if exist "%VENV_PY%" (
 )
 
 rem ---- 回退：系统 Python ----
-where python >nul 2>&1
+rem 判断对象要和启动对象一致：下面启动的是 pythonw.exe，就检测 pythonw，
+rem 否则精简版 Python 只有 python.exe 而无 pythonw.exe 时会静默失败。
+where pythonw >nul 2>&1
 if not errorlevel 1 (
     echo 使用系统 Python 启动 Clicker.py ...
     powershell -NoProfile -Command "Start-Process -FilePath 'pythonw.exe' -ArgumentList 'Clicker.py', '--gui' -Verb RunAs -WorkingDirectory '%~dp0'"
