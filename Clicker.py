@@ -247,7 +247,8 @@ class ClickerManager:
 
     def __init__(self, push_toast=None):
         self.logger = logging.getLogger("clicker")
-        self.clicker = InterceptionCore()
+        # 加载持久化配置（含 move_mouse 开关），避免每次启动都回退到默认值
+        self.clicker = InterceptionCore(ConfigManager.load_config("default"))
         self.action_executor = ActionExecutor()
         # 注入 clicker 引用到 action_executor，以便执行器能读取运行时配置（例如 move_mouse）
         try:

@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, List, Optional
 from ctypes import wintypes
 
+from InterceptionCore import find_keyboard_device, find_mouse_device
+
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -273,19 +275,31 @@ class ActionExecutor:
         """初始化 Interception"""
         try:
             import os
+            import platform
+            # 与 InterceptionCore 保持一致的多路径搜索：只找 __file__ 同目录和 CWD
+            # 两条路径时，源码模式下（仓库根目录没有 interception.dll）会全部落空，
+            # 导致 self._lib=None、动作脚本的鼠标和键盘静默失效。补上 third\ 回退，
+            # 并用 isfile 预筛，避免对不存在的相对路径盲目 CDLL。
+            arch = "x64" if platform.architecture()[0] == "64bit" else "x86"
+            project_root = os.path.dirname(os.path.abspath(__file__))
             dll_paths = [
-                os.path.join(os.path.dirname(__file__), "interception.dll"),
+                os.path.join(project_root, "interception.dll"),
+                os.path.join(project_root, "third", "Interception", "library", arch, "interception.dll"),
+                os.path.join(project_root, "third", "Interception", "library", "x64", "interception.dll"),
+                os.path.join(project_root, "third", "Interception", "library", "x86", "interception.dll"),
                 "interception.dll",
             ]
             
             lib = None
             for path in dll_paths:
+                if not path or not os.path.isfile(path):
+                    continue
                 try:
                     lib = ctypes.CDLL(path)
                     self.logger.info(f"加载 Interception: {path}")
                     break
                 except Exception:
-                    pass
+                    continue
             
             if lib is None:
                 raise OSError("无法加载 interception.dll")
@@ -306,7 +320,11 @@ class ActionExecutor:
             if not self._ctx:
                 raise OSError("无法创建 Interception 上下文")
             
-            self._device = 11  # INTERCEPTION_MOUSE(0)
+            # 枚举真实挂载了硬件的鼠标槽位；不能硬编码 11，空槽位 send 会静默失败。
+            # 这里不抛异常：没有鼠标时键盘注入仍然可用。
+            self._device = find_mouse_device(self._lib, self._ctx)
+            if self._device is None:
+                self.logger.warning("未发现鼠标设备，脚本中的鼠标动作将无效")
             self._keyboard_device = None
             self.logger.info("ActionExecutor Interception 已初始化")
         
@@ -316,7 +334,7 @@ class ActionExecutor:
     
     def _send_mouse_stroke(self, stroke: InterceptionMouseStroke) -> bool:
         """发送鼠标 stroke"""
-        if not self._lib or not self._ctx:
+        if not self._lib or not self._ctx or self._device is None:
             return False
         try:
             arr = (InterceptionMouseStroke * 1)(stroke)
@@ -339,19 +357,16 @@ class ActionExecutor:
             return False
 
     def _ensure_keyboard_device(self) -> Optional[int]:
-        """按 MAA 的方式枚举一个键盘设备。"""
+        """枚举一个真正挂载了硬件的键盘设备。"""
         if self._keyboard_device is not None:
             return self._keyboard_device
         if not self._lib or not self._ctx:
             return None
-        for device in range(1, INTERCEPTION_MAX_DEVICE + 1):
-            try:
-                if self._lib.interception_is_keyboard(device) > 0:
-                    self._keyboard_device = device
-                    self.logger.info("已发现键盘设备: %d", device)
-                    return device
-            except Exception:
-                continue
+        device = find_keyboard_device(self._lib, self._ctx)
+        if device is not None:
+            self._keyboard_device = device
+            self.logger.info("已发现键盘设备: %d", device)
+            return device
         self.logger.warning("未发现键盘设备，键盘注入将失败")
         return None
 

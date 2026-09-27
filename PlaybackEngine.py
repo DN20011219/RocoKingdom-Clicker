@@ -24,7 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
 
-from InterceptionCore import InterceptionMouseStroke, InterceptionKeyStroke
+from InterceptionCore import (
+    InterceptionMouseStroke,
+    InterceptionKeyStroke,
+    find_keyboard_device,
+    find_mouse_device,
+)
 
 # Interception 鼠标状态位（与 interception.h 对齐）
 # 注意：MOUSE_MOVE 不是 state 位，是 filter 位（0x1000）！
@@ -376,38 +381,32 @@ class PlaybackEngine:
 
     # ---- 设备枚举 -----------------------------------------------------------
     def _find_keyboard_device(self) -> Optional[int]:
-        """枚举找到第一个键盘设备 ID（1~10）。"""
+        """枚举找到第一个挂载了硬件的键盘设备 ID（1~10）。"""
         if self._keyboard_device is not None:
             return self._keyboard_device
         lib = self.clicker._lib
         if not lib:
             return None
-        for device in range(1, 11):  # 键盘设备范围 1~10
-            try:
-                if lib.interception_is_keyboard(device) > 0:
-                    self._keyboard_device = device
-                    self.logger.info("回放：已找到键盘设备 %d", device)
-                    return device
-            except Exception:
-                continue
+        device = find_keyboard_device(lib, self.clicker._ctx)
+        if device is not None:
+            self._keyboard_device = device
+            self.logger.info("回放：已找到键盘设备 %d", device)
+            return device
         self.logger.warning("回放：未找到键盘设备")
         return None
 
     def _find_mouse_device(self) -> Optional[int]:
-        """枚举找到第一个鼠标设备 ID（11~20）。"""
+        """枚举找到第一个挂载了硬件的鼠标设备 ID（11~20）。"""
         if self._mouse_device is not None:
             return self._mouse_device
         lib = self.clicker._lib
         if not lib:
             return None
-        for device in range(11, 21):  # 鼠标设备范围 11~20
-            try:
-                if lib.interception_is_mouse(device) > 0:
-                    self._mouse_device = device
-                    self.logger.info("回放：已找到鼠标设备 %d", device)
-                    return device
-            except Exception:
-                continue
+        device = find_mouse_device(lib, self.clicker._ctx)
+        if device is not None:
+            self._mouse_device = device
+            self.logger.info("回放：已找到鼠标设备 %d", device)
+            return device
         self.logger.warning("回放：未找到鼠标设备")
         return None
 

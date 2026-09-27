@@ -38,6 +38,12 @@ If Not fso.FileExists(installerPath) Then
     objShell.Popup msg, 0, "Notice - RocoKingdom Clicker", 48
 End If
 
+' ---- 关于驱动预检 ----
+' 能否使用驱动，取决于“能否创建上下文并注入/读取”，只有加载 DLL 后才能判断。
+' vbs 无法可靠预检：Interception 并不注册名为 interception 的服务（它以 keyboard.sys /
+' mouse.sys 类过滤驱动形式安装），按服务名查询会在驱动正常时误判为未安装（假阴性）。
+' 权威检测在程序启动时：Clicker.py 的 probe.is_ready() 失败会弹框提示安装驱动。
+
 Set objShellApp = CreateObject("Shell.Application")
 
 launchOK = False
@@ -49,8 +55,18 @@ ElseIf fso.FileExists(venvPythonw) Then
     objShellApp.ShellExecute venvPythonw, "Clicker.py --gui", scriptDir, "runas", 1
     launchOK = True
 Else
+    ' 系统 Python 回退：不能无条件置 launchOK=True。pythonw.exe 若不存在，
+    ' ShellExecute 会抛错；因为用的是 pythonw（无控制台），用户看不到任何反应，
+    ' 下面的“启动失败”提示也永不触发。用错误处理让 launchOK 反映真实结果。
+    On Error Resume Next
     objShellApp.ShellExecute "pythonw.exe", "Clicker.py --gui", scriptDir, "runas", 1
-    launchOK = True
+    If Err.Number = 0 Then
+        launchOK = True
+    Else
+        launchOK = False
+        Err.Clear
+    End If
+    On Error GoTo 0
 End If
 
 If Not launchOK Then
