@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from InterceptionCore import ClickerConfig
+from MidiScore import LAYOUT_NAME_ROCO_HANDPAN, LAYOUT_ROCO_HANDPAN
 
 
 # F1-F12 虚拟键码映射
@@ -105,8 +106,28 @@ REGION_PATH_STRATEGIES = ("global", "sine", "fitts", "neuromotor", "straight")
 # 区域连点的鼠标按键合法取值
 REGION_BUTTONS = ("left", "right", "middle")
 
+# MIDI 自动演奏默认参数（对应 GUI 第五栏）
+DEFAULT_MUSIC_PLAYER = {
+    # 键位绑定：音高 → 按键。默认是《洛克王国：世界》手碟九键，面板里可改可增删
+    "bindings": [dict(item) for item in LAYOUT_ROCO_HANDPAN],
+    "layout_name": LAYOUT_NAME_ROCO_HANDPAN,
+    # 移调：0 = 不移调；auto_shift 为真时，若原调无法完整演奏会自动挑一个
+    # 「能演奏全部音符且移调量最小」的方案
+    "semitone_shift": 0,
+    "auto_shift": True,
+    "speed_percent": 100,         # 演奏速度百分比
+    "hold_percent": 90,           # 按键保持时长占音符时值的比例，留出抬手时间
+    "min_hold_ms": 45,            # 最短按住时长，太短游戏可能识别不到
+    "retrigger_gap_ms": 12,       # 同一个键两次按下之间的最小间隔
+    "max_polyphony": 0,           # 0 = 不限同时按住的键数
+    "loop_count": 1,              # 0 = 无限循环
+    "loop_delay_ms": 0,           # 每轮之间的间隔
+    "countdown_sec": 3,           # 开演前倒计时，用来切到游戏窗口
+}
+
 # CONFIG_DIR 下不属于"用户连点配置"的文件（避免污染 list_configs 的 CLI 菜单）
-NON_CONFIG_FILES = {"hotkeys", "path_planner", "region_click", "region_presets"}
+NON_CONFIG_FILES = {"hotkeys", "path_planner", "region_click", "region_presets",
+                    "music_player"}
 
 
 class ConfigManager:
@@ -589,4 +610,98 @@ class ConfigManager:
             return True
         except Exception as e:
             cls.logger.error("删除区域预设失败: %s", e)
+            return False
+
+    # ---- MIDI 自动演奏配置 ----
+
+    MUSIC_PLAYER_FILE = CONFIG_DIR / "music_player.json"
+
+    # 整数字段的合法区间：脏数据夹回边界，而不是让整个配置回退到默认值
+    _MUSIC_INT_RANGES = {
+        "semitone_shift": (-48, 48),
+        "speed_percent": (10, 400),
+        "hold_percent": (5, 100),
+        "min_hold_ms": (5, 500),
+        "retrigger_gap_ms": (1, 200),
+        "max_polyphony": (0, 16),
+        "loop_count": (0, 99999),
+        "loop_delay_ms": (0, 600000),
+        "countdown_sec": (0, 30),
+    }
+
+    @classmethod
+    def load_music_player(cls) -> dict:
+        """加载 MIDI 自动演奏参数，返回完整参数字典（缺失项用默认值）。
+
+        键位绑定单独走 KeyLayout.from_list 校验：单条绑定非法只丢那一条，
+        不能因为用户手滑写坏一行就把整套九键全冲掉。
+        """
+        from MidiScore import KeyLayout
+
+        cls.ensure_config_dir()
+        config = {
+            key: (list(value) if isinstance(value, list) else value)
+            for key, value in DEFAULT_MUSIC_PLAYER.items()
+        }
+        if not cls.MUSIC_PLAYER_FILE.exists():
+            return config
+
+        try:
+            with open(cls.MUSIC_PLAYER_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            cls.logger.warning("加载 MIDI 演奏配置失败: %s，使用默认配置", e)
+            return config
+
+        for key, (low, high) in cls._MUSIC_INT_RANGES.items():
+            if key not in data:
+                continue
+            try:
+                config[key] = max(low, min(high, int(data[key])))
+            except (TypeError, ValueError):
+                cls.logger.warning("MIDI 演奏配置 %s 非法（%r），沿用默认值", key, data[key])
+        if isinstance(data.get("auto_shift"), bool):
+            config["auto_shift"] = data["auto_shift"]
+        if isinstance(data.get("layout_name"), str) and data["layout_name"]:
+            config["layout_name"] = data["layout_name"]
+        if isinstance(data.get("bindings"), list):
+            layout = KeyLayout.from_list(data["bindings"],
+                                         name=str(config.get("layout_name") or "custom"))
+            if len(layout):
+                config["bindings"] = layout.to_list()
+            else:
+                cls.logger.warning("MIDI 演奏配置里的键位绑定全部非法，沿用默认九键")
+
+        cls.logger.info("MIDI 演奏配置已从 %s 加载（%d 个键位绑定）",
+                        cls.MUSIC_PLAYER_FILE, len(config["bindings"]))
+        return config
+
+    @classmethod
+    def save_music_player(cls, config: dict) -> bool:
+        """保存 MIDI 自动演奏参数到文件。"""
+        cls.ensure_config_dir()
+        try:
+            data = {}
+            for key, default in DEFAULT_MUSIC_PLAYER.items():
+                if key not in config:
+                    data[key] = default
+                    continue
+                if key in cls._MUSIC_INT_RANGES:
+                    low, high = cls._MUSIC_INT_RANGES[key]
+                    try:
+                        data[key] = max(low, min(high, int(config[key])))
+                    except (TypeError, ValueError):
+                        data[key] = default
+                elif isinstance(default, bool):
+                    data[key] = bool(config[key])
+                elif isinstance(default, str):
+                    data[key] = str(config[key])
+                elif isinstance(default, list):
+                    data[key] = list(config[key]) if isinstance(config[key], list) else default
+            with open(cls.MUSIC_PLAYER_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            cls.logger.info("MIDI 演奏配置已保存到 %s", cls.MUSIC_PLAYER_FILE)
+            return True
+        except Exception as e:
+            cls.logger.error("保存 MIDI 演奏配置失败: %s", e)
             return False

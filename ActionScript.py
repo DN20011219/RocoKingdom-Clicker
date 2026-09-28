@@ -93,6 +93,19 @@ VK_TO_SCANCODE = {
     0x58: (0x2D, False),
     0x59: (0x15, False),
     0x5A: (0x2C, False),
+    # 主键盘区标点（US 布局，AT Set 1 扫描码）。MIDI 自动演奏面板允许把音符绑到
+    # 任意可注入的按键上，表里没有的键只能退回 keybd_event，游戏里更容易丢键。
+    0xBA: (0x27, False),
+    0xBB: (0x0D, False),
+    0xBC: (0x33, False),
+    0xBD: (0x0C, False),
+    0xBE: (0x34, False),
+    0xBF: (0x35, False),
+    0xC0: (0x29, False),
+    0xDB: (0x1A, False),
+    0xDC: (0x2B, False),
+    0xDD: (0x1B, False),
+    0xDE: (0x28, False),
     0x60: (0x52, False),
     0x61: (0x4F, False),
     0x62: (0x50, False),
@@ -103,6 +116,10 @@ VK_TO_SCANCODE = {
     0x67: (0x47, False),
     0x68: (0x48, False),
     0x69: (0x49, False),
+    0x6A: (0x37, False),
+    0x6B: (0x4E, False),
+    0x6D: (0x4A, False),
+    0x6E: (0x53, False),
     0x6F: (0x35, True),
     0x70: (0x3B, False),
     0x71: (0x3C, False),
@@ -469,6 +486,46 @@ class ActionExecutor:
 
     def _vk_to_scancode(self, vk_code: int) -> tuple[Optional[int], bool]:
         return VK_TO_SCANCODE.get(vk_code, (None, False))
+
+    def is_keyboard_ready(self) -> bool:
+        """键盘注入是否可用（找得到真正挂了硬件的键盘设备）。"""
+        return self._ensure_keyboard_device() is not None
+
+    def key_down(self, vk_code: int) -> bool:
+        """按下一个键并保持按住，返回是否成功。
+
+        与 _execute_key 的区别在于按下和抬起被拆成两次调用：MIDI 自动演奏需要
+        精确控制每个音的时值（按住多久由谱子决定），不能在一次调用里 sleep 完。
+        """
+        scancode, extended = self._vk_to_scancode(vk_code)
+        if scancode is None:
+            self.logger.warning("未知 VK，无法注入按键: 0x%02x", vk_code)
+            return False
+        if self._send_key_event(scancode, INTERCEPTION_KEY_DOWN, extended):
+            return True
+        try:
+            user32.keybd_event(vk_code, 0, 0, 0)
+            self.logger.warning("按键按下回退 keybd_event VK=0x%02x", vk_code)
+            return True
+        except Exception as e:
+            self.logger.error("按键按下失败 VK=0x%02x: %s", vk_code, e)
+            return False
+
+    def key_up(self, vk_code: int) -> bool:
+        """抬起一个按住的键，返回是否成功。"""
+        scancode, extended = self._vk_to_scancode(vk_code)
+        if scancode is None:
+            self.logger.warning("未知 VK，无法注入按键: 0x%02x", vk_code)
+            return False
+        if self._send_key_event(scancode, INTERCEPTION_KEY_UP, extended):
+            return True
+        try:
+            user32.keybd_event(vk_code, 0, KEYEVENTF_KEYUP, 0)
+            self.logger.warning("按键抬起回退 keybd_event VK=0x%02x", vk_code)
+            return True
+        except Exception as e:
+            self.logger.error("按键抬起失败 VK=0x%02x: %s", vk_code, e)
+            return False
 
     def _apply_jitter(self, value: int, jitter: int, minimum: int = 0) -> int:
         """给数值添加随机扰动并限制下限。"""

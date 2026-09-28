@@ -15,6 +15,14 @@ _build.log
 data/clicker_configs/region_click.json
 data/clicker_configs/region_presets.json
 
+# Runtime-generated MIDI player config (key bindings + play options)
+data/clicker_configs/music_player.json
+
+# 曲谱不入库：MIDI 谱子多为第三方曲目的转录，随仓库/发布包分发会有版权问题。
+# 目录本身由 data/music/README.md 保留，用户把自己的 .mid 丢进去或用面板导入即可。
+data/music/*.mid
+data/music/*.midi
+
 # Temporary helper scripts
 _finish_release.ps1
 _verify_build.ps1

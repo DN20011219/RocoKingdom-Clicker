@@ -157,14 +157,16 @@ class Api:
         self.manager.stop_playback()
         return True
 
-    # ---- 暂停/继续/停止 API（脚本和回放通用） ----
+    # ---- 暂停/继续/停止 API（脚本、回放、MIDI 演奏通用） ----
 
     def pause_current(self):
-        """暂停当前正在运行的脚本或回放。"""
+        """暂停当前正在运行的脚本、回放或 MIDI 演奏。"""
         def worker():
             try:
                 m = self.manager
-                if m.script_running and not m.script_paused:
+                if m.is_music_playing():
+                    m.pause_music_play()
+                elif m.script_running and not m.script_paused:
                     m.pause_script()
                 elif m._playback and m._playback.is_playing() and not m._playback.is_paused():
                     m.pause_playback()
@@ -178,11 +180,13 @@ class Api:
         return True
 
     def resume_current(self):
-        """继续当前暂停的脚本或回放。"""
+        """继续当前暂停的脚本、回放或 MIDI 演奏。"""
         def worker():
             try:
                 m = self.manager
-                if m.script_running and m.script_paused:
+                if m.is_music_playing():
+                    m.resume_music_play()
+                elif m.script_running and m.script_paused:
                     m.resume_script()
                 elif m._playback and m._playback.is_paused():
                     m.resume_playback()
@@ -196,11 +200,13 @@ class Api:
         return True
 
     def stop_current(self):
-        """停止当前正在运行的脚本或回放。"""
+        """停止当前正在运行的脚本、回放或 MIDI 演奏。"""
         def worker():
             try:
                 m = self.manager
-                if m.script_running:
+                if m.is_music_playing() or m.is_music_counting_down():
+                    m.stop_music_play()
+                elif m.script_running:
                     m.stop_script()
                 elif m._playback and m._playback.is_playing():
                     m.stop_playback()
@@ -411,6 +417,105 @@ class Api:
                 pass
             return False
 
+    # ---- MIDI 自动演奏 API ----
+
+    def list_music_scores(self):
+        """列出 data/music 下的全部 MIDI 曲谱（程序启动时即自动读取）。"""
+        try:
+            return self.manager.list_music_scores()
+        except Exception:
+            return []
+
+    def import_music_score(self, path: str):
+        """把一个 MIDI 文件复制进曲谱库，返回新曲谱名（失败返回 None）。"""
+        try:
+            return self.manager.import_music_score(path)
+        except Exception as e:
+            try:
+                from webview import push_toast
+                push_toast(f"❌ 导入曲谱失败: {e}", duration=4.0)
+            except Exception:
+                pass
+            return None
+
+    def delete_music_score(self, name: str) -> bool:
+        """从曲谱库删除一首曲谱。"""
+        try:
+            return bool(self.manager.delete_music_score(name))
+        except Exception:
+            return False
+
+    def get_music_config(self) -> dict:
+        """返回 MIDI 演奏参数（含键位绑定、曲谱库路径、键位表概况）。"""
+        try:
+            return self.manager.get_music_config()
+        except Exception:
+            from ConfigManager import DEFAULT_MUSIC_PLAYER
+            return dict(DEFAULT_MUSIC_PLAYER)
+
+    def save_music_config(self, config: dict) -> bool:
+        """保存 MIDI 演奏参数。"""
+        try:
+            return bool(self.manager.save_music_config(config))
+        except Exception as e:
+            try:
+                from webview import push_toast
+                push_toast(f"❌ 保存演奏参数失败: {e}", duration=4.0)
+            except Exception:
+                pass
+            return False
+
+    def reset_music_bindings(self) -> dict:
+        """把键位绑定恢复成出厂的洛克手碟九键，返回最新配置。"""
+        try:
+            return self.manager.reset_music_bindings()
+        except Exception:
+            return {}
+
+    def analyze_music_score(self, name: str, shift=None) -> dict:
+        """检查曲谱能否完整演奏；不能时返回具体是哪些音没有绑定按键。"""
+        try:
+            return self.manager.analyze_music_score(name, shift)
+        except Exception as e:
+            return {
+                "name": name, "loaded": False, "ok": False,
+                "error": str(e), "warnings": [str(e)],
+                "missing": [], "missing_text": "", "summary": "",
+            }
+
+    def start_music_play(self, name: str, params=None) -> bool:
+        """开始演奏曲谱（内部已在后台线程倒计时并演奏，不阻塞 UI）。"""
+        try:
+            return bool(self.manager.start_music_play(name, params))
+        except Exception as e:
+            try:
+                from webview import push_toast
+                push_toast(f"❌ 启动演奏失败: {e}", duration=4.0)
+            except Exception:
+                pass
+            return False
+
+    def stop_music_play(self) -> bool:
+        """停止演奏。"""
+        def worker():
+            try:
+                self.manager.stop_music_play()
+            except Exception as e:
+                try:
+                    from webview import push_toast
+                    push_toast(f"❌ 停止演奏失败: {e}", duration=3.0)
+                except Exception:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def get_music_status(self) -> dict:
+        """返回演奏状态与进度。"""
+        try:
+            return self.manager.get_music_status()
+        except Exception:
+            return {"playing": False, "paused": False, "counting_down": False}
+
     def get_status(self):
         cfg = self.manager.clicker.config
         # 仅返回对用户有用的精简字段；在 move_mouse 为 True 时才包含位置信息
@@ -443,6 +548,13 @@ class Api:
             status["region_click_active"] = False
             status["region_click_total"] = 0
             status["region_click_spots"] = 0
+
+        # MIDI 自动演奏状态与进度
+        try:
+            status["music"] = self.manager.get_music_status()
+        except Exception:
+            status["music"] = {"playing": False, "paused": False,
+                               "counting_down": False}
 
         # 回放进度（录制脚本专有）
         pb = getattr(self.manager, "_playback", None)
@@ -536,7 +648,7 @@ def start_gui():
     index_path = (WEB_DIR / 'index.html').as_uri()
 
     # run webview in main thread
-    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=2340, height=1300)
+    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=2540, height=1300)
     webview.start()
 
     # webview 窗口关闭后，彻底清理所有后台线程和资源

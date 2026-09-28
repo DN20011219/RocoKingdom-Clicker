@@ -18,7 +18,14 @@ import argparse
 from dataclasses import fields as dataclass_fields
 
 from InterceptionCore import InterceptionCore
-from ConfigManager import ConfigManager, FKEY_VK, FKEY_SCANCODE, DEFAULT_HOTKEYS, DEFAULT_ANCHOR_MODE
+from ConfigManager import (
+    ConfigManager,
+    DEFAULT_MUSIC_PLAYER,
+    FKEY_VK,
+    FKEY_SCANCODE,
+    DEFAULT_HOTKEYS,
+    DEFAULT_ANCHOR_MODE,
+)
 from ActionScript import (
     ActionScriptManager,
     ActionExecutor,
@@ -30,6 +37,18 @@ from ActionScript import (
 )
 from InputRecorder import InputRecorder
 from PlaybackEngine import PlaybackEngine
+from MidiScore import (
+    KeyLayout,
+    MidiParseError,
+    MusicLibrary,
+    PerformanceOptions,
+    best_shift,
+    build_performance,
+    check_score,
+    note_name,
+    parse_midi,
+)
+from MusicPlayer import MusicPlayer
 import DriverInstaller
 
 
@@ -320,6 +339,21 @@ class ClickerManager:
         self._recording_session_active: bool = False
         self._playback_name: str | None = None    # 当前回放脚本名
 
+        # ---- MIDI 自动演奏 ----
+        # 曲谱库固定在 data/music；解析结果按 (路径, mtime) 缓存，
+        # 面板每次刷新都重新解析一个几 MB 的 MIDI 会明显卡顿
+        self.music_library = MusicLibrary(get_app_dir() / "data")
+        # 启动即建好 data/music，用户能直接往里丢 .mid 文件
+        try:
+            self.music_library.ensure_dir()
+        except Exception as e:
+            self.logger.warning("创建曲谱目录失败: %s", e)
+        self._music_player: MusicPlayer | None = None
+        self._music_name: str | None = None
+        self._music_cache: dict[str, tuple[float, object]] = {}
+        # 倒计时期间用户点了停止：靠这个事件把还没开演的会话掐掉
+        self._music_cancel = threading.Event()
+
         # ---- 热键配置 ----
         self._hotkeys: dict[str, str] = ConfigManager.load_hotkeys()
         self._hotkey_vk: dict[str, int] = {
@@ -445,6 +479,11 @@ class ClickerManager:
     def _dispatch_hotkey(self, vk_code: int):
         """根据虚拟键码分发热键事件到对应处理函数。"""
         try:
+            # 演奏期间只认暂停/继续热键。注入的按键同样会被低级键盘钩子看到，
+            # 如果用户把某个音符绑到了 F1-F12，演奏到那个音就会顺带触发录制或圈选。
+            if ((self.is_music_playing() or self.is_music_counting_down())
+                    and vk_code != self._hotkey_vk.get("pause_resume")):
+                return
             if vk_code == self._hotkey_vk["pause_resume"]:
                 self._on_pause_resume_hotkey()
             elif vk_code == self._hotkey_vk["start_recording"]:
@@ -469,8 +508,18 @@ class ClickerManager:
             self.logger.error("热键处理异常: %s\n%s", e, traceback.format_exc())
 
     def _on_pause_resume_hotkey(self):
-        """处理暂停/继续热键：优先回放，其次脚本。"""
-        # 回放优先
+        """处理暂停/继续热键：依次判断演奏、回放、脚本、连点器。"""
+        # MIDI 演奏优先（它和其他会话互斥，且最需要立刻止住声音）
+        if self.is_music_playing():
+            if self._music_player.is_paused():
+                self.resume_music_play()
+            else:
+                self.pause_music_play()
+            return
+        if self.is_music_counting_down():
+            self.stop_music_play()
+            return
+        # 回放其次
         if self._playback and self._playback.is_playing():
             result = self._playback.toggle_pause()
             if result == "paused":
@@ -661,6 +710,9 @@ class ClickerManager:
         if not self.clicker.is_ready():
             self._show_driver_warning()
             return False
+        if self.is_music_playing() or self.is_music_counting_down():
+            self._toast("⚠ 正在演奏 MIDI，请先停止", duration=2.5)
+            return False
         if self.script_running:
             self._toast("⚠ 已有脚本在运行，请先停止", duration=2.5)
             return False
@@ -728,6 +780,447 @@ class ClickerManager:
         self._toast(f"✓ 已保存脚本：{script_name}" if ok else f"❌ 保存脚本失败：{script_name}",
                     duration=3.0)
         return ok
+
+    # ---- MIDI 自动演奏 API（供 GUI 第五栏调用） ----
+
+    def _ensure_music_player(self) -> MusicPlayer | None:
+        """惰性创建演奏引擎（复用 action_executor 的键盘注入通道，不再多开一个
+        Interception 上下文）。"""
+        if self._music_player is not None:
+            return self._music_player
+        try:
+            player = MusicPlayer(self.action_executor, self.logger)
+            player.on_complete = self._on_music_complete
+            self._music_player = player
+            return player
+        except Exception as e:
+            self.logger.error("MusicPlayer 初始化失败: %s\n%s", e, traceback.format_exc())
+            return None
+
+    @staticmethod
+    def _music_layout(config: dict) -> KeyLayout:
+        """从配置里的绑定列表重建键位表。"""
+        return KeyLayout.from_list(
+            config.get("bindings") or [],
+            name=str(config.get("layout_name") or "custom"),
+        )
+
+    def get_music_config(self) -> dict:
+        """返回 MIDI 演奏参数，附带曲谱库路径与键位表概况。"""
+        config = ConfigManager.load_music_player()
+        layout = self._music_layout(config)
+        config["music_dir"] = str(self.music_library.music_dir)
+        config["layout_range"] = layout.range_text()
+        config["layout_conflicts"] = layout.conflicts()
+        return config
+
+    def save_music_config(self, config: dict) -> bool:
+        """保存 MIDI 演奏参数。
+
+        先与已落盘的配置合并，避免面板未编辑的字段（如 min_hold_ms）被静默丢弃。
+        """
+        merged = ConfigManager.load_music_player()
+        merged.update(config or {})
+        ok = ConfigManager.save_music_player(merged)
+        if ok:
+            self._toast("✓ 演奏参数已保存", duration=2.5)
+        else:
+            self._toast("❌ 演奏参数保存失败", duration=3.0)
+        return ok
+
+    def reset_music_bindings(self) -> dict:
+        """把键位绑定恢复成出厂的洛克手碟九键。"""
+        merged = ConfigManager.load_music_player()
+        merged["bindings"] = [dict(item) for item in DEFAULT_MUSIC_PLAYER["bindings"]]
+        merged["layout_name"] = DEFAULT_MUSIC_PLAYER["layout_name"]
+        ConfigManager.save_music_player(merged)
+        self._toast("✓ 已恢复默认键位（洛克手碟九键）", duration=2.5)
+        return self.get_music_config()
+
+    def list_music_scores(self) -> list:
+        """列出 data/music 下的全部曲谱。"""
+        try:
+            return self.music_library.list_scores()
+        except Exception as e:
+            self.logger.error("列出曲谱失败: %s", e)
+            return []
+
+    def import_music_score(self, path: str) -> str | None:
+        """把一个 MIDI 文件复制进曲谱库，返回新曲谱名。"""
+        try:
+            imported = self.music_library.import_file(path)
+        except Exception as e:
+            self.logger.error("导入曲谱失败: %s", e)
+            imported = None
+        if imported is None:
+            self._toast("❌ 导入失败：只能导入 .mid / .midi 文件", duration=3.0)
+            return None
+        self._toast(f"✓ 已导入曲谱：{imported.stem}", duration=2.5)
+        return imported.stem
+
+    def delete_music_score(self, name: str) -> bool:
+        """从曲谱库删除一首曲谱。"""
+        if self.is_music_playing() and self._music_name == name:
+            self._toast("⚠ 正在演奏该曲谱，请先停止", duration=2.5)
+            return False
+        ok = self.music_library.delete(name)
+        # 缓存键是解析后的绝对路径，删除时拿不到扩展名，直接整体清掉最省事：
+        # 缓存本来就只存几首曲谱，重建成本可以忽略
+        self._music_cache.clear()
+        self._toast(f"✓ 已删除曲谱：{name}" if ok else "❌ 曲谱不存在", duration=2.5)
+        return ok
+
+    def _load_music_score(self, name: str):
+        """解析曲谱，返回 (score, error)。结果按 mtime 缓存。"""
+        path = self.music_library.resolve(name)
+        if path is None:
+            return None, f"曲谱不存在：{name}"
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            stamp = 0.0
+        cache_key = str(path)
+        cached = self._music_cache.get(cache_key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1], None
+        try:
+            score = parse_midi(path)
+        except MidiParseError as e:
+            return None, f"MIDI 解析失败：{e}"
+        except Exception as e:
+            self.logger.error("解析曲谱异常 %s: %s\n%s", path, e, traceback.format_exc())
+            return None, f"读取曲谱失败：{e}"
+        self._music_cache[cache_key] = (stamp, score)
+        return score, None
+
+    def analyze_music_score(self, name: str, shift: int | None = None) -> dict:
+        """检查曲谱能否用当前键位表完整演奏（GUI 面板的分析入口）。"""
+        return self._analyze_music(name, ConfigManager.load_music_player(), shift)
+
+    def _analyze_music(self, name: str, config: dict, shift: int | None = None) -> dict:
+        layout = self._music_layout(config)
+        score, error = self._load_music_score(name)
+        try:
+            requested = int(shift if shift is not None else config.get("semitone_shift", 0))
+        except (TypeError, ValueError):
+            requested = 0
+        requested = max(-48, min(48, requested))
+
+        result = {
+            "name": name,
+            "loaded": score is not None,
+            "error": error,
+            "ok": False,
+            "total_notes": 0,
+            "playable_notes": 0,
+            "missing_notes": 0,
+            "missing": [],
+            "missing_text": "",
+            "summary": "",
+            "warnings": [],
+            "duration": 0.0,
+            "duration_text": "0:00",
+            "bpm": 0.0,
+            "track_count": 0,
+            "tracks": [],
+            "min_pitch": None,
+            "max_pitch": None,
+            "min_name": "—",
+            "max_name": "—",
+            "requested_shift": requested,
+            "shift": requested,
+            "auto_shift_used": False,
+            "shift_suggestion": None,
+            "peak_notes_per_second": 0,
+            "same_key_overlaps": 0,
+            "layout_range": layout.range_text(),
+            "layout_key_count": len(layout),
+            "layout_conflicts": layout.conflicts(),
+        }
+
+        if score is None:
+            result["warnings"] = [error or "曲谱无法解析"]
+            return result
+
+        check = check_score(score, layout, requested)
+        auto_used = False
+        # 原调演奏不了时，自动挑一个「能演奏全部音符且移调量最小」的方案；
+        # 找不到就保持原移调，把缺失音原样报给用户
+        if not check.ok and config.get("auto_shift", True):
+            suggested = best_shift(score, layout)
+            if suggested is not None and suggested != requested:
+                check = check_score(score, layout, suggested)
+                auto_used = True
+
+        result.update({
+            "ok": check.ok,
+            "total_notes": check.total_notes,
+            "playable_notes": check.playable_notes,
+            "missing_notes": check.missing_notes,
+            "missing": [
+                {
+                    "pitch": item.pitch,
+                    "name": item.name,
+                    "count": item.count,
+                    "first_time": round(item.first_time, 2),
+                    "nearest_name": item.nearest_name,
+                    "nearest_semitones": item.nearest_semitones,
+                    "describe": item.describe(),
+                }
+                for item in check.missing
+            ],
+            "missing_text": check.describe_missing(),
+            "summary": check.summary(),
+            "duration": round(check.duration, 2),
+            "duration_text": score.duration_text(),
+            "bpm": round(check.bpm, 1),
+            "track_count": len(score.tracks),
+            "tracks": [{"name": t.name, "note_count": t.note_count}
+                       for t in score.tracks],
+            "min_pitch": check.min_pitch,
+            "max_pitch": check.max_pitch,
+            "min_name": note_name(check.min_pitch) if check.min_pitch is not None else "—",
+            "max_name": note_name(check.max_pitch) if check.max_pitch is not None else "—",
+            "shift": check.shift,
+            "auto_shift_used": auto_used,
+            "shift_suggestion": None if check.ok else best_shift(score, layout),
+            "peak_notes_per_second": check.peak_notes_per_second,
+            "same_key_overlaps": check.same_key_overlaps,
+        })
+
+        warnings: list[str] = []
+        if not len(layout):
+            warnings.append("键位表是空的，请先绑定按键")
+        for key in layout.conflicts():
+            warnings.append(f"按键 {key} 绑了多个音，实际只会发出音高最低的那个")
+        if check.total_notes == 0:
+            warnings.append("曲谱里没有音符")
+        elif not check.ok and result["shift_suggestion"] is not None:
+            warnings.append(
+                f"把移调改成 {result['shift_suggestion']:+d} 半音即可完整演奏")
+        if check.peak_notes_per_second > 12:
+            warnings.append(
+                f"最密集的一秒有 {check.peak_notes_per_second} 个音，游戏里可能来不及全部触发")
+        if check.same_key_overlaps:
+            warnings.append(
+                f"有 {check.same_key_overlaps} 处同键音符重叠，演奏时会自动提前抬手重触发")
+        if auto_used:
+            warnings.append(f"原调演奏不了，已自动移调 {check.shift:+d} 半音")
+        result["warnings"] = warnings
+        return result
+
+    def is_music_playing(self) -> bool:
+        return bool(self._music_player and self._music_player.is_playing())
+
+    def is_music_counting_down(self) -> bool:
+        """是否处于开演前的倒计时阶段（还没真正开始按键）。"""
+        return bool(self._music_name and self.countdown_end and not self.is_music_playing())
+
+    def start_music_play(self, name: str, params: dict | None = None) -> bool:
+        """开始演奏指定曲谱。
+
+        验收要求在这里落实：只有「每个音都绑定了按键」（或移调后能全部绑定）
+        才允许开演，否则直接拒绝并告诉用户是哪几个音没有绑定。
+        """
+        player = self._ensure_music_player()
+        if player is None:
+            self._toast("❌ 演奏引擎初始化失败", duration=3.0)
+            return False
+        if player.is_playing() or self.is_music_counting_down():
+            self._toast("⚠ 已在演奏中，请先停止", duration=2.5)
+            return False
+        if not self.action_executor.is_keyboard_ready():
+            self._toast("❌ 键盘注入不可用（Interception 未就绪）", duration=4.0)
+            self._show_driver_warning()
+            return False
+        if self.script_running:
+            self._toast("⚠ 已有脚本在运行，请先停止", duration=2.5)
+            return False
+        if self._playback and self._playback.is_playing():
+            self._toast("⚠ 正在回放，请先停止", duration=2.5)
+            return False
+        if self._recording_session_active:
+            self._toast("⚠ 正在录制，请先停止", duration=2.5)
+            return False
+
+        config = ConfigManager.load_music_player()
+        if params:
+            for key in list(config.keys()):
+                if key in params and params[key] is not None:
+                    config[key] = params[key]
+
+        analysis = self._analyze_music(name, config)
+        if not analysis["loaded"]:
+            self._toast(f"❌ {analysis['error'] or '曲谱无法解析'}", duration=4.0)
+            return False
+        if not analysis["ok"]:
+            self._toast(self._missing_toast_text(analysis), duration=6.0)
+            return False
+
+        score, _ = self._load_music_score(name)
+        if score is None:
+            self._toast("❌ 曲谱读取失败", duration=3.0)
+            return False
+
+        options = PerformanceOptions(
+            hold_ratio=int(config["hold_percent"]) / 100.0,
+            min_hold_ms=int(config["min_hold_ms"]),
+            retrigger_gap_ms=int(config["retrigger_gap_ms"]),
+            max_polyphony=int(config["max_polyphony"]),
+        )
+        performance = build_performance(score, self._music_layout(config),
+                                        analysis["shift"], options)
+        if not performance.events:
+            self._toast("❌ 没有可演奏的音符", duration=3.0)
+            return False
+
+        player.speed = int(config["speed_percent"]) / 100.0
+        player.set_loop_config(int(config["loop_count"]),
+                               int(config["loop_delay_ms"]) / 1000.0)
+        if not player.load(performance, name):
+            self._toast("❌ 载入演奏序列失败", duration=3.0)
+            return False
+
+        self._music_cancel.clear()
+        threading.Thread(
+            target=self._run_music_session,
+            args=(name, max(0, int(config["countdown_sec"]))),
+            daemon=True,
+        ).start()
+        return True
+
+    @staticmethod
+    def _missing_toast_text(analysis: dict) -> str:
+        """把「哪些音没绑定按键」压缩成一条能放进 toast 的提示。"""
+        missing = analysis.get("missing") or []
+        shown = "、".join(f"{item['name']}×{item['count']}" for item in missing[:4])
+        if len(missing) > 4:
+            shown += f" 等 {len(missing)} 个音"
+        text = f"❌ 无法演奏：{shown} 没有绑定按键"
+        suggestion = analysis.get("shift_suggestion")
+        if suggestion is not None:
+            text += f"\n改成移调 {suggestion:+d} 半音即可完整演奏"
+        return text
+
+    def _run_music_session(self, name: str, countdown: int) -> None:
+        """倒计时后真正开演（放在后台线程，避免阻塞 GUI）。"""
+        player = self._music_player
+        if player is None:
+            return
+        self._music_name = name
+        try:
+            if countdown > 0:
+                self.countdown_end = time.time() + countdown
+                self.countdown_label = f"演奏 {name} 即将开始"
+                self._toast(f"⏳ {countdown} 秒后开始演奏：{name}\n请切换到游戏窗口",
+                            duration=countdown + 1.0)
+                for _ in range(countdown):
+                    if self._music_cancel.wait(1.0):
+                        break
+                self.countdown_end = None
+                self.countdown_label = None
+                if self._music_cancel.is_set():
+                    self._music_name = None
+                    self._toast("已取消演奏", duration=2.0)
+                    return
+
+            if player.start():
+                loop = player.loop_count
+                label = "，无限循环" if loop == 0 else (f"，循环 {loop} 次" if loop > 1 else "")
+                meta = player.get_meta()
+                self._toast(
+                    f"🎹 开始演奏：{name}"
+                    f"（{meta.get('note_count', 0)} 个音符 / {meta.get('key_count', 0)} 个键{label}）",
+                    duration=3.0)
+            else:
+                self._music_name = None
+                self._toast("❌ 演奏启动失败", duration=3.0)
+        except Exception as e:
+            self._music_name = None
+            self.countdown_end = None
+            self.countdown_label = None
+            self.logger.error("演奏会话异常: %s\n%s", e, traceback.format_exc())
+            self._toast(f"❌ 演奏异常: {e}", duration=4.0)
+
+    def stop_music_play(self) -> bool:
+        """停止演奏（倒计时阶段则是取消）。"""
+        self._music_cancel.set()
+        player = self._music_player
+        if player is not None and player.is_playing():
+            name = self._music_name or "曲谱"
+            player.stop()
+            self._toast(f"⏹ 演奏已停止：{name}", duration=2.0)
+            return True
+        if self._music_name:
+            self.countdown_end = None
+            self.countdown_label = None
+            self._music_name = None
+            self._toast("已取消演奏", duration=2.0)
+            return True
+        return False
+
+    def pause_music_play(self) -> bool:
+        player = self._music_player
+        if player and player.pause():
+            self._toast("⏸ 演奏已暂停", duration=2.0)
+            return True
+        return False
+
+    def resume_music_play(self) -> bool:
+        player = self._music_player
+        if player and player.resume():
+            self._toast("▶ 演奏已继续", duration=2.0)
+            return True
+        return False
+
+    def get_music_status(self) -> dict:
+        """返回演奏状态与进度（供 GUI 展示）。"""
+        player = self._music_player
+        playing = bool(player and player.is_playing())
+        counting_down = self.is_music_counting_down()
+        if not playing:
+            return {
+                "playing": False,
+                "paused": False,
+                "counting_down": counting_down,
+                "name": self._music_name if counting_down else None,
+                "event_index": 0,
+                "event_total": 0,
+                "position": 0.0,
+                "duration": 0.0,
+                "loop_current": 0,
+                "loop_total": 0,
+            }
+        index, total = player.get_progress()
+        position, duration = player.get_position()
+        loop_current, loop_total = player.get_loop_progress()
+        return {
+            "playing": True,
+            "paused": bool(player.is_paused()),
+            "counting_down": False,
+            "name": self._music_name,
+            "event_index": index,
+            "event_total": total,
+            "position": round(position, 2),
+            "duration": round(duration, 2),
+            "loop_current": loop_current,
+            "loop_total": loop_total,
+        }
+
+    def _on_music_complete(self, success: bool, stopped: bool):
+        """演奏结束回调（在演奏线程里调用）。"""
+        name = self._music_name or "曲谱"
+        self._music_name = None
+        try:
+            if stopped:
+                # 主动停止的提示由 stop_music_play 负责，这里不重复弹
+                return
+            if success:
+                self._toast(f"✅ 演奏完成：{name}", duration=3.0)
+            else:
+                self._toast(f"❌ 演奏中断：{name}", duration=3.0)
+        except Exception:
+            pass
 
     # ---- 回放暂停/继续 API（供 GUI 按钮调用） ----
 
@@ -889,6 +1382,10 @@ class ClickerManager:
             if self._playback and self._playback.is_playing():
                 self.logger.info("停止回放以开始录制")
                 self._playback.stop()
+            # 演奏注入的按键会被录制器当成用户输入记下来，必须先停掉
+            if self.is_music_playing() or self.is_music_counting_down():
+                self.logger.info("停止 MIDI 演奏以开始录制")
+                self.stop_music_play()
 
             self._recording_name = script_name
             self._recording_session_active = True
@@ -994,6 +1491,10 @@ class ClickerManager:
         if not self.clicker.is_ready():
             toast("❌ Interception 驱动未就绪", duration=5.0)
             self._show_driver_warning()
+            return False
+
+        if self.is_music_playing() or self.is_music_counting_down():
+            toast("⚠ 正在演奏 MIDI，请先停止", duration=3.0)
             return False
 
         # 先停止其他会话
@@ -1132,26 +1633,31 @@ class ClickerManager:
         if self.clicker.running:
             self.clicker.stop()
 
-        # 2. 停止回放
+        # 2. 停止 MIDI 演奏（演奏线程会抬起所有按住的键，不能跳过）
+        self._music_cancel.set()
+        if self._music_player and self._music_player.is_playing():
+            self._music_player.stop()
+
+        # 3. 停止回放
         if self._playback and self._playback.is_playing():
             self._playback.stop()
 
-        # 3. 停止脚本执行（唤醒暂停中的线程）
+        # 4. 停止脚本执行（唤醒暂停中的线程）
         self._stop_active_script_session(wait_timeout=2.0)
 
-        # 4. 停止录制会话
+        # 5. 停止录制会话
         if self._recording_session_active and self._recorder:
             self._recorder.stop()
             self._recording_session_active = False
 
-        # 5. 停止录制热键监听
+        # 6. 停止录制热键监听
         if self._recorder:
             self._recorder.stop_hotkey_listener()
 
-        # 6. 停止全局热键监听（卸载低级别键盘钩子）
+        # 7. 停止全局热键监听（卸载低级别键盘钩子）
         self.hotkey_listener.stop()
 
-        # 7. 停止热键分发线程
+        # 8. 停止热键分发线程
         self.running = False
         self.listening = False
         if self._hotkey_dispatch_thread and self._hotkey_dispatch_thread.is_alive():

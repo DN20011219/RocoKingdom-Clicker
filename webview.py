@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import queue
 
 from RegionSelector import RegionSelector, format_region
+from MidiScore import normalize_key_label, note_name, parse_note_name
 
 
 # ──────────────────────────────────────────────
@@ -84,6 +85,228 @@ def push_toast(text: str, duration: float = 3.0):
 _window_config = None
 
 
+class BindingEditorDialog:
+    """「音高 → 按键」绑定编辑对话框（第五栏「编辑键位」）。
+
+    对话框只负责编辑与校验，落盘通过 on_save 回调交回 _DesktopWindow，
+    这样它不直接依赖 js_api，配色也复用主窗口的那一套主题常量。
+    """
+
+    def __init__(self, owner, bindings: list, on_save):
+        self.owner = owner
+        self.on_save = on_save
+        self._rows: list[dict] = []
+
+        self.win = tk.Toplevel(owner.root)
+        self.win.title("编辑键位绑定")
+        self.win.configure(bg=owner.BG)
+        self.win.geometry("460x600")
+        self.win.minsize(420, 420)
+        self.win.transient(owner.root)
+
+        tk.Label(self.win, text="把每个音绑定到一个键盘按键",
+                 font=("Segoe UI", 12, "bold"), fg=owner.TEXT,
+                 bg=owner.BG).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(self.win,
+                 text="音名支持 C4 / C#4 / Db4 这类写法，也可以直接填 MIDI 音高数字"
+                      "（中央 C = 60）。按键只能是字母、数字、F1-F12 或标点。",
+                 font=("Segoe UI", 8), fg=owner.TEXT_MUTED, bg=owner.BG,
+                 wraplength=420, justify="left").pack(anchor="w", padx=14, pady=(0, 8))
+
+        self._build_table()
+        self._build_footer()
+
+        for item in bindings or ():
+            try:
+                self._append_row(int(item.get("pitch")), str(item.get("key", "")),
+                                 str(item.get("note") or ""))
+            except (AttributeError, TypeError, ValueError):
+                continue
+
+        # 主窗口被最小化时 grab_set 会抛 "window not viewable"，
+        # 抢不到焦点不影响编辑，不能让它把对话框整个搞崩
+        try:
+            self.win.grab_set()
+        except Exception:
+            pass
+        self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    # ---- 布局 ----
+
+    def _build_table(self):
+        owner = self.owner
+        wrap = tk.Frame(self.win, bg=owner.BG)
+        wrap.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+        canvas = tk.Canvas(wrap, bg=owner.BG, highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        self._body = tk.Frame(canvas, bg=owner.BG)
+        self._body_id = canvas.create_window((0, 0), window=self._body, anchor="nw")
+        self._body.bind("<Configure>",
+                        lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(self._body_id, width=e.width))
+
+        def _on_wheel(event):
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        for col, text in enumerate(("音名", "MIDI", "按键", "")):
+            tk.Label(self._body, text=text, font=("Segoe UI", 8, "bold"),
+                     fg=owner.TEXT_MUTED, bg=owner.BG, anchor="w"
+                     ).grid(row=0, column=col, sticky="w", padx=(0, 8), pady=(0, 4))
+        self._body.columnconfigure(0, weight=2)
+        self._body.columnconfigure(1, weight=1)
+        self._body.columnconfigure(2, weight=2)
+
+    def _build_footer(self):
+        owner = self.owner
+        add_frame = tk.Frame(self.win, bg=owner.PANEL_BG, padx=10, pady=8)
+        add_frame.pack(fill="x", padx=14, pady=(0, 8))
+
+        tk.Label(add_frame, text="音名/MIDI", font=("Segoe UI", 9),
+                 fg=owner.TEXT, bg=owner.PANEL_BG).grid(row=0, column=0, sticky="w")
+        self._new_pitch = tk.StringVar(value="")
+        tk.Entry(add_frame, textvariable=self._new_pitch, width=10,
+                 font=("Segoe UI", 9, "bold"), bg=owner.CARD_BG, fg=owner.TEXT,
+                 insertbackground=owner.TEXT, relief="flat", bd=0
+                 ).grid(row=0, column=1, sticky="w", padx=(6, 12))
+
+        tk.Label(add_frame, text="按键", font=("Segoe UI", 9),
+                 fg=owner.TEXT, bg=owner.PANEL_BG).grid(row=0, column=2, sticky="w")
+        self._new_key = tk.StringVar(value="")
+        tk.Entry(add_frame, textvariable=self._new_key, width=6,
+                 font=("Segoe UI", 9, "bold"), bg=owner.CARD_BG, fg=owner.TEXT,
+                 insertbackground=owner.TEXT, relief="flat", bd=0
+                 ).grid(row=0, column=3, sticky="w", padx=(6, 12))
+
+        ttk.Button(add_frame, text="➕ 添加", command=self._on_add).grid(row=0, column=4)
+
+        buttons = tk.Frame(self.win, bg=owner.BG)
+        buttons.pack(fill="x", padx=14, pady=(0, 12))
+        ttk.Button(buttons, text="↺ 恢复默认",
+                   command=self._on_restore_defaults).pack(side="left", expand=True,
+                                                           fill="x", padx=(0, 4))
+        ttk.Button(buttons, text="取消",
+                   command=self._on_cancel).pack(side="left", expand=True,
+                                                 fill="x", padx=4)
+        ttk.Button(buttons, text="💾 保存", style="Primary.TButton",
+                   command=self._on_save).pack(side="left", expand=True,
+                                               fill="x", padx=(4, 0))
+
+    # ---- 行操作 ----
+
+    def _append_row(self, pitch: int, key: str, note: str = "") -> None:
+        owner = self.owner
+        row_index = len(self._rows) + 1
+        frame = tk.Frame(self._body, bg=owner.BG)
+        frame.grid(row=row_index, column=0, columnspan=4, sticky="ew", pady=1)
+
+        key_var = tk.StringVar(value=key)
+        tk.Label(frame, text=note_name(pitch), font=("Segoe UI", 9),
+                 fg=owner.TEXT, bg=owner.BG, width=6, anchor="w").pack(side="left")
+        tk.Label(frame, text=str(pitch), font=("Segoe UI", 9),
+                 fg=owner.TEXT_MUTED, bg=owner.BG, width=5, anchor="w").pack(side="left",
+                                                                            padx=(0, 8))
+        entry = tk.Entry(frame, textvariable=key_var, width=6,
+                         font=("Segoe UI", 9, "bold"), bg=owner.CARD_BG,
+                         fg=owner.TEXT, insertbackground=owner.TEXT,
+                         relief="flat", bd=0, justify="center")
+        entry.pack(side="left")
+        ttk.Button(frame, text="🗑", width=3,
+                   command=lambda: self._remove_row(pitch)).pack(side="left", padx=(8, 0))
+
+        self._rows.append({"pitch": pitch, "key_var": key_var,
+                           "note": note, "frame": frame, "entry": entry})
+
+    def _remove_row(self, pitch: int) -> None:
+        for row in self._rows:
+            if row["pitch"] == pitch:
+                row["frame"].destroy()
+                self._rows.remove(row)
+                break
+        # grid 行号是按插入顺序排的，删掉一行后必须重排，否则会留下空行
+        for index, row in enumerate(self._rows, start=1):
+            row["frame"].grid_configure(row=index)
+
+    def _on_add(self) -> None:
+        pitch = parse_note_name(self._new_pitch.get())
+        if pitch is None:
+            messagebox.showwarning("音名无法识别",
+                                   "请填写 C4 / C#4 / Db4 这样的音名，或 0~127 的 MIDI 音高数字。",
+                                   parent=self.win)
+            return
+        if normalize_key_label(self._new_key.get()) is None:
+            messagebox.showwarning("按键无法识别",
+                                   "按键只能是字母、数字、F1-F12、SPACE 或标点符号。",
+                                   parent=self.win)
+            return
+        if any(row["pitch"] == pitch for row in self._rows):
+            self._remove_row(pitch)
+        self._append_row(pitch, normalize_key_label(self._new_key.get()))
+        self._new_pitch.set("")
+        self._new_key.set("")
+
+    def _on_restore_defaults(self) -> None:
+        from MidiScore import LAYOUT_ROCO_HANDPAN
+        if not messagebox.askyesno("恢复默认", "确定恢复成默认的洛克手碟九键吗？",
+                                   parent=self.win):
+            return
+        for row in list(self._rows):
+            row["frame"].destroy()
+        self._rows.clear()
+        for item in LAYOUT_ROCO_HANDPAN:
+            self._append_row(int(item["pitch"]), str(item["key"]), str(item.get("note") or ""))
+
+    # ---- 保存 / 取消 ----
+
+    def _on_save(self) -> None:
+        bindings: list[dict] = []
+        seen_keys: dict[str, int] = {}
+        for row in self._rows:
+            raw = row["key_var"].get()
+            key = normalize_key_label(raw)
+            if key is None:
+                row["entry"].configure(highlightthickness=1,
+                                       highlightbackground=self.owner.DANGER)
+                messagebox.showwarning(
+                    "按键无法识别",
+                    f"{note_name(row['pitch'])} 绑定的按键「{raw or '（空）'}」不合法。\n"
+                    "按键只能是字母、数字、F1-F12、SPACE 或标点符号。",
+                    parent=self.win)
+                return
+            if key in seen_keys:
+                messagebox.showwarning(
+                    "按键冲突",
+                    f"按键 {key} 同时绑给了 {note_name(seen_keys[key])} 和 "
+                    f"{note_name(row['pitch'])}，实际只会发出音高较低的那个。",
+                    parent=self.win)
+                return
+            seen_keys[key] = row["pitch"]
+            item = {"pitch": row["pitch"], "key": key}
+            if row.get("note"):
+                item["note"] = row["note"]
+            bindings.append(item)
+
+        if not bindings:
+            messagebox.showwarning("键位为空",
+                                   "至少需要绑定一个音，否则任何曲谱都无法演奏。",
+                                   parent=self.win)
+            return
+
+        bindings.sort(key=lambda b: b["pitch"])
+        self.win.destroy()
+        self.on_save(bindings)
+
+    def _on_cancel(self) -> None:
+        self.win.destroy()
+
+
 class _DesktopWindow:
     # ── 配色方案（现代深蓝/靛蓝主题） ──
     BG          = "#0f172a"  # 主背景（深蓝灰）
@@ -107,7 +330,7 @@ class _DesktopWindow:
         self.root = tk.Tk()
         self.root.title(title)
         self.root.geometry(f"{width}x{height}")
-        self.root.minsize(2260, 900)
+        self.root.minsize(2460, 900)
         self.root.configure(bg=self.BG)
 
         self.status_var = tk.StringVar(value="准备就绪")
@@ -222,6 +445,7 @@ class _DesktopWindow:
         body.columnconfigure(1, weight=5)
         body.columnconfigure(2, weight=3)
         body.columnconfigure(3, weight=3)
+        body.columnconfigure(4, weight=3)
         body.rowconfigure(0, weight=1)
 
         # ── 左栏：状态与控制（内含三组） ─────────────────────────
@@ -587,6 +811,11 @@ class _DesktopWindow:
         right2 = ttk.Frame(body)
         right2.grid(row=0, column=3, sticky="nsew", padx=(12, 0))
         self._build_region_panel(right2)
+
+        # ── 第五栏：MIDI 自动演奏 ─────────────────────────
+        right3 = ttk.Frame(body)
+        right3.grid(row=0, column=4, sticky="nsew", padx=(12, 0))
+        self._build_music_panel(right3)
 
         footer = ttk.Frame(self.root, padding=(22, 0, 22, 16))
         footer.pack(fill="x")
@@ -1584,6 +1813,587 @@ class _DesktopWindow:
         except Exception:
             pass
 
+    # ── 第五栏：MIDI 自动演奏 ──────────────────────
+
+    # (配置字段, 标签, 最小值, 最大值)
+    _MUSIC_PARAM_ROWS = [
+        ("speed_percent", "演奏速度 (%)", 10, 400),
+        ("hold_percent", "按键保持 (%)", 5, 100),
+        ("countdown_sec", "开演倒计时 (秒)", 0, 30),
+        ("loop_count", "循环次数 (0=无限)", 0, 99999),
+        ("loop_delay_ms", "每轮间隔 (ms)", 0, 600000),
+        ("max_polyphony", "最多同时按键 (0=不限)", 0, 16),
+    ]
+    _MUSIC_NO_SCORE = "（未选择曲谱）"
+
+    def _build_music_panel(self, parent):
+        """构建第五栏「MIDI 自动演奏」面板。"""
+        panel = self._make_scrollable(parent)
+
+        self._music_map: dict[str, str] = {}
+        self._music_analysis: dict | None = None
+        self._music_bindings: list[dict] = []
+        self._music_vars: dict[str, tk.StringVar] = {}
+        self._music_auto_shift = tk.BooleanVar(value=True)
+        self._music_dir_var = tk.StringVar(value="")
+        self._music_check_var = tk.StringVar(value="尚未检查")
+        self._music_summary_var = tk.StringVar(value="")
+        self._music_range_var = tk.StringVar(value="")
+        self._music_run_var = tk.StringVar(value="未运行")
+        self._music_progress = tk.DoubleVar(value=0)
+
+        # ---- 组 1：曲谱库 ----
+        lib_frame = ttk.LabelFrame(panel, text="  曲谱库（data/music）  ", padding=12)
+        lib_frame.pack(fill="x", pady=(0, 10))
+
+        list_box = tk.Frame(lib_frame, bg=self.BG)
+        list_box.pack(fill="x", pady=(0, 8))
+        music_scroll = ttk.Scrollbar(list_box, orient="vertical")
+        music_scroll.pack(side="right", fill="y")
+        self.music_list = tk.Listbox(
+            list_box, activestyle="none", height=7,
+            font=("Segoe UI", 10),
+            bg=self.CARD_BG, fg=self.TEXT,
+            selectbackground=self.SELECT_BG, selectforeground="#ffffff",
+            highlightthickness=0, bd=0, relief="flat",
+        )
+        self.music_list.pack(side="left", fill="both", expand=True)
+        self.music_list.configure(yscrollcommand=music_scroll.set)
+        music_scroll.configure(command=self.music_list.yview)
+        self.music_list.bind("<<ListboxSelect>>", lambda e: self._on_music_selected())
+        self.music_list.bind("<Double-Button-1>", lambda e: self._on_music_play())
+
+        lib_btns = tk.Frame(lib_frame, bg=self.BG)
+        lib_btns.pack(fill="x", pady=(0, 6))
+        ttk.Button(lib_btns, text="📂 导入 MIDI",
+                   command=self._on_music_import).pack(side="left", expand=True,
+                                                       fill="x", padx=(0, 4))
+        ttk.Button(lib_btns, text="↻ 刷新",
+                   command=self.refresh_music_scores).pack(side="left", expand=True,
+                                                           fill="x", padx=4)
+        ttk.Button(lib_btns, text="🗑 删除",
+                   command=self._on_music_delete).pack(side="left", expand=True,
+                                                       fill="x", padx=(4, 0))
+        tk.Label(lib_frame, textvariable=self._music_dir_var, font=("Segoe UI", 8),
+                 fg=self.TEXT_MUTED, bg=self.BG, anchor="w", justify="left",
+                 wraplength=300).pack(fill="x")
+
+        # ---- 组 2：键位绑定 ----
+        bind_frame = ttk.LabelFrame(panel, text="  键位绑定  ", padding=12)
+        bind_frame.pack(fill="x", pady=(0, 10))
+        self._music_badges = tk.Frame(bind_frame, bg=self.BG)
+        self._music_badges.pack(fill="x", pady=(0, 6))
+        tk.Label(bind_frame, textvariable=self._music_range_var,
+                 font=("Segoe UI", 9), fg=self.TEXT_MUTED, bg=self.BG,
+                 anchor="w", justify="left", wraplength=300).pack(fill="x", pady=(0, 8))
+
+        bind_btns = tk.Frame(bind_frame, bg=self.BG)
+        bind_btns.pack(fill="x")
+        ttk.Button(bind_btns, text="✏ 编辑键位",
+                   command=self._on_music_edit_bindings).pack(side="left", expand=True,
+                                                              fill="x", padx=(0, 4))
+        ttk.Button(bind_btns, text="↺ 恢复默认",
+                   command=self._on_music_reset_bindings).pack(side="left", expand=True,
+                                                               fill="x", padx=(4, 0))
+
+        # ---- 组 3：曲谱检查 ----
+        check_frame = ttk.LabelFrame(panel, text="  曲谱检查  ", padding=12)
+        check_frame.pack(fill="x", pady=(0, 10))
+
+        shift_row = tk.Frame(check_frame, bg=self.BG)
+        shift_row.pack(fill="x", pady=(0, 6))
+        tk.Label(shift_row, text="移调 (半音)", font=("Segoe UI", 9),
+                 fg=self.TEXT, bg=self.BG).pack(side="left")
+        self._music_vars["semitone_shift"] = tk.StringVar(value="0")
+        shift_spin = tk.Spinbox(
+            shift_row, from_=-48, to=48, width=6,
+            textvariable=self._music_vars["semitone_shift"],
+            font=("Segoe UI", 9, "bold"),
+            bg=self.CARD_BG, fg=self.TEXT, buttonbackground=self.ACCENT,
+            relief="flat", bd=0, justify="right",
+            command=self._on_music_shift_change,
+        )
+        shift_spin.pack(side="left", padx=(8, 8))
+        shift_spin.bind("<Return>", lambda e: self._on_music_shift_change())
+        shift_spin.bind("<FocusOut>", lambda e: self._on_music_shift_change())
+        ttk.Checkbutton(shift_row, text="自动移调",
+                        variable=self._music_auto_shift,
+                        command=self._on_music_shift_change).pack(side="left")
+
+        self._music_check_label = tk.Label(
+            check_frame, textvariable=self._music_check_var,
+            font=("Segoe UI", 11, "bold"), fg=self.TEXT_MUTED, bg=self.BG,
+            anchor="w", justify="left", wraplength=300,
+        )
+        self._music_check_label.pack(fill="x", pady=(0, 4))
+        tk.Label(check_frame, textvariable=self._music_summary_var,
+                 font=("Segoe UI", 9), fg=self.TEXT_MUTED, bg=self.BG,
+                 anchor="w", justify="left", wraplength=300).pack(fill="x", pady=(0, 6))
+
+        detail_box = tk.Frame(check_frame, bg=self.BG)
+        detail_box.pack(fill="x")
+        detail_scroll = ttk.Scrollbar(detail_box, orient="vertical")
+        detail_scroll.pack(side="right", fill="y")
+        self._music_detail = tk.Text(
+            detail_box, height=8, wrap="word",
+            font=("Segoe UI", 9), bg=self.CARD_BG, fg=self.TEXT,
+            insertbackground=self.TEXT, relief="flat", bd=0, padx=8, pady=6,
+            state="disabled",
+        )
+        self._music_detail.pack(side="left", fill="both", expand=True)
+        self._music_detail.configure(yscrollcommand=detail_scroll.set)
+        detail_scroll.configure(command=self._music_detail.yview)
+        self._music_detail.tag_configure("bad", foreground="#fca5a5")
+        self._music_detail.tag_configure("warn", foreground="#fcd34d")
+        self._music_detail.tag_configure("good", foreground="#86efac")
+
+        # ---- 组 4：演奏控制 ----
+        run_frame = ttk.LabelFrame(panel, text="  演奏控制  ", padding=12)
+        run_frame.pack(fill="x")
+
+        param_grid = tk.Frame(run_frame, bg=self.BG)
+        param_grid.pack(fill="x", pady=(0, 8))
+        for row_idx, (key, label, low, high) in enumerate(self._MUSIC_PARAM_ROWS):
+            tk.Label(param_grid, text=label, font=("Segoe UI", 9), fg=self.TEXT,
+                     bg=self.BG, anchor="w").grid(row=row_idx, column=0, sticky="w",
+                                                  pady=2, padx=(0, 6))
+            self._music_vars[key] = tk.StringVar(value=str(low))
+            tk.Spinbox(param_grid, from_=low, to=high, width=8,
+                       textvariable=self._music_vars[key],
+                       font=("Segoe UI", 9, "bold"),
+                       bg=self.CARD_BG, fg=self.TEXT, buttonbackground=self.ACCENT,
+                       relief="flat", bd=0, justify="right"
+                       ).grid(row=row_idx, column=1, sticky="e", pady=2)
+        param_grid.columnconfigure(0, weight=1)
+
+        self.btn_music_play = ttk.Button(run_frame, text="▶ 开始演奏",
+                                         style="Primary.TButton",
+                                         command=self._on_music_play, state="disabled")
+        self.btn_music_play.pack(fill="x", pady=(0, 6))
+
+        music_ctrl = tk.Frame(run_frame, bg=self.BG)
+        music_ctrl.pack(fill="x", pady=(0, 6))
+        self.btn_music_pause = ttk.Button(music_ctrl, text="⏸ 暂停",
+                                          command=self._on_music_pause, state="disabled")
+        self.btn_music_pause.pack(side="left", expand=True, fill="x", padx=(0, 4))
+        self.btn_music_resume = ttk.Button(music_ctrl, text="▶ 继续",
+                                           command=self._on_music_resume, state="disabled")
+        self.btn_music_resume.pack(side="left", expand=True, fill="x", padx=4)
+        self.btn_music_stop = ttk.Button(music_ctrl, text="⏹ 停止",
+                                         style="Danger.TButton",
+                                         command=self._on_music_stop, state="disabled")
+        self.btn_music_stop.pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+        ttk.Button(run_frame, text="💾 保存演奏参数",
+                   command=self._on_music_save_config).pack(fill="x", pady=(0, 8))
+
+        ttk.Progressbar(run_frame, variable=self._music_progress, maximum=100,
+                        mode="determinate").pack(fill="x")
+        self._music_run_label = tk.Label(run_frame, textvariable=self._music_run_var,
+                                         font=("Segoe UI", 9, "bold"),
+                                         fg=self.TEXT_MUTED, bg=self.BG,
+                                         anchor="w", justify="left", wraplength=300)
+        self._music_run_label.pack(fill="x", pady=(4, 0))
+
+        self._init_music_panel()
+
+    def _init_music_panel(self):
+        """从配置初始化第五栏，并读取曲谱库列表。"""
+        try:
+            cfg = self.js_api.get_music_config() or {}
+        except Exception:
+            cfg = {}
+        self._music_bindings = list(cfg.get("bindings") or [])
+        self._music_auto_shift.set(bool(cfg.get("auto_shift", True)))
+        for key, _label, low, high in self._MUSIC_PARAM_ROWS:
+            var = self._music_vars.get(key)
+            if var is None:
+                continue
+            try:
+                value = int(cfg.get(key, low))
+            except (TypeError, ValueError):
+                value = low
+            var.set(str(max(low, min(high, value))))
+        shift_var = self._music_vars.get("semitone_shift")
+        if shift_var is not None:
+            try:
+                shift_var.set(str(int(cfg.get("semitone_shift", 0))))
+            except (TypeError, ValueError):
+                shift_var.set("0")
+        music_dir = cfg.get("music_dir") or ""
+        self._music_dir_var.set(f"曲谱目录：{music_dir}" if music_dir else "")
+        self._refresh_music_badges(cfg)
+        self.refresh_music_scores()
+
+    def _refresh_music_badges(self, cfg: dict | None = None):
+        """重绘键位徽章（音名 ▸ 按键）。"""
+        if cfg is None:
+            try:
+                cfg = self.js_api.get_music_config() or {}
+            except Exception:
+                cfg = {}
+        self._music_bindings = list(cfg.get("bindings") or [])
+        for child in self._music_badges.winfo_children():
+            child.destroy()
+
+        if not self._music_bindings:
+            tk.Label(self._music_badges, text="尚未绑定任何按键",
+                     font=("Segoe UI", 9), fg=self.WARNING,
+                     bg=self.BG).grid(row=0, column=0, sticky="w")
+        else:
+            for index, binding in enumerate(self._music_bindings):
+                row, col = divmod(index, 3)
+                pitch = binding.get("pitch")
+                text = f"{note_name(pitch)} ▸ {binding.get('key', '?')}"
+                tk.Label(self._music_badges, text=text,
+                         font=("Segoe UI", 9, "bold"), fg="#ffffff",
+                         bg=self.ACCENT, padx=6, pady=2
+                         ).grid(row=row, column=col, sticky="ew", padx=2, pady=2)
+            for col in range(3):
+                self._music_badges.columnconfigure(col, weight=1)
+
+        conflicts = cfg.get("layout_conflicts") or []
+        range_text = cfg.get("layout_range") or "未绑定任何按键"
+        if conflicts:
+            range_text += f"\n⚠ 按键冲突：{', '.join(conflicts)}"
+        self._music_range_var.set(f"音域：{range_text}")
+
+    # ---- 曲谱库操作 ----
+
+    def refresh_music_scores(self, select: str | None = None):
+        """刷新曲谱列表（程序启动时自动调用一次）。"""
+        try:
+            scores = self.js_api.list_music_scores() or []
+        except Exception:
+            scores = []
+
+        previous = self._selected_music()
+        self._music_map.clear()
+        self.music_list.delete(0, tk.END)
+        for item in scores:
+            name = item.get("name") if isinstance(item, dict) else str(item)
+            if not name:
+                continue
+            self._music_map[name] = name
+            self.music_list.insert(tk.END, name)
+
+        target = select or previous
+        if target and target in self._music_map:
+            self._select_music(target)
+        elif self.music_list.size():
+            self._select_music(self.music_list.get(0))
+        else:
+            self._music_analysis = None
+            self._set_music_check(None)
+
+    def _select_music(self, name: str):
+        index = self.music_list.get(0, tk.END)
+        if name in index:
+            self.music_list.selection_clear(0, tk.END)
+            self.music_list.selection_set(index.index(name))
+            self.music_list.see(index.index(name))
+        self._analyze_music(name)
+
+    def _selected_music(self) -> str | None:
+        selection = self.music_list.curselection()
+        if not selection:
+            return None
+        return self._music_map.get(self.music_list.get(selection[0]))
+
+    def _on_music_selected(self):
+        name = self._selected_music()
+        if name:
+            self._analyze_music(name)
+
+    def _on_music_import(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="导入 MIDI 曲谱",
+            filetypes=[("MIDI 曲谱", "*.mid *.midi"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            name = self.js_api.import_music_score(path)
+        except Exception as exc:
+            messagebox.showerror("导入失败", str(exc))
+            return
+        if name:
+            self.refresh_music_scores(select=name)
+
+    def _on_music_delete(self):
+        name = self._selected_music()
+        if not name:
+            push_toast("先选择一首曲谱", duration=2.0)
+            return
+        if not messagebox.askyesno("确认删除", f"确定从曲谱库删除「{name}」吗？\n（只删除副本，不影响原文件）"):
+            return
+        try:
+            self.js_api.delete_music_score(name)
+        except Exception as exc:
+            messagebox.showerror("删除失败", str(exc))
+            return
+        self.refresh_music_scores()
+
+    # ---- 检查与分析 ----
+
+    def _current_shift(self) -> int:
+        var = self._music_vars.get("semitone_shift")
+        try:
+            return max(-48, min(48, int(float(var.get()))))
+        except (AttributeError, ValueError, tk.TclError):
+            return 0
+
+    def _analyze_music(self, name: str):
+        """调用后端检查曲谱能否完整演奏，并刷新检查结果区。"""
+        try:
+            analysis = self.js_api.analyze_music_score(name, self._current_shift())
+        except Exception as exc:
+            analysis = {"name": name, "loaded": False, "ok": False,
+                        "error": str(exc), "warnings": [str(exc)],
+                        "missing": [], "missing_text": "", "summary": ""}
+        self._music_analysis = analysis
+        self._set_music_check(analysis)
+
+    def _set_music_check(self, analysis: dict | None):
+        """把检查结果写进状态行、摘要行与明细框。"""
+        if not analysis:
+            self._music_check_var.set("尚未检查")
+            self._music_check_label.configure(foreground=self.TEXT_MUTED)
+            self._music_summary_var.set("")
+            self._set_music_detail("")
+            self.btn_music_play.configure(state="disabled", text="▶ 开始演奏",
+                                          style="Primary.TButton")
+            return
+
+        self._music_summary_var.set(analysis.get("summary") or "")
+        warnings = list(analysis.get("warnings") or [])
+
+        if not analysis.get("loaded"):
+            self._music_check_var.set("❌ 曲谱无法读取")
+            self._music_check_label.configure(foreground=self.DANGER)
+            self._set_music_detail(analysis.get("error") or "曲谱无法读取", "bad")
+            self.btn_music_play.configure(state="disabled", text="▶ 开始演奏",
+                                          style="Primary.TButton")
+            return
+
+        if analysis.get("ok"):
+            shift = int(analysis.get("shift") or 0)
+            extra = f"（已自动移调 {shift:+d}）" if analysis.get("auto_shift_used") else ""
+            self._music_check_var.set(f"✅ 可以演奏{extra}")
+            self._music_check_label.configure(foreground=self.SUCCESS)
+            detail = "\n".join(f"⚠ {line}" for line in warnings) if warnings else \
+                "曲谱里的每个音都已绑定按键，可以直接演奏。"
+            self._set_music_detail(detail, "warn" if warnings else "good")
+            self.btn_music_play.configure(state="normal", text="▶ 开始演奏",
+                                          style="Primary.TButton")
+            return
+
+        missing = analysis.get("missing") or []
+        self._music_check_var.set(
+            f"❌ 无法演奏：{len(missing)} 个音没有绑定按键"
+            f"（{analysis.get('missing_notes', 0)} 个音符）")
+        self._music_check_label.configure(foreground=self.DANGER)
+        self._set_music_detail(
+            "\n".join([analysis.get("missing_text") or ""] +
+                      [f"⚠ {line}" for line in warnings]).strip(),
+            "bad")
+        # 按钮保持可点：点下去直接把「哪些音没绑定」摊开给用户看
+        self.btn_music_play.configure(state="normal",
+                                      text="⚠ 无法演奏 · 查看原因",
+                                      style="Danger.TButton")
+
+    def _set_music_detail(self, text: str, tag: str = ""):
+        widget = self._music_detail
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        if text:
+            widget.insert(tk.END, text, tag)
+        widget.configure(state="disabled")
+
+    def _on_music_shift_change(self):
+        name = self._selected_music()
+        if name:
+            self._analyze_music(name)
+
+    def _collect_music_config(self) -> dict:
+        """收集面板上的演奏参数（含移调与自动移调开关）。"""
+        cfg: dict = {"auto_shift": bool(self._music_auto_shift.get()),
+                     "semitone_shift": self._current_shift()}
+        for key, _label, low, high in self._MUSIC_PARAM_ROWS:
+            var = self._music_vars.get(key)
+            if var is None:
+                continue
+            try:
+                cfg[key] = max(low, min(high, int(float(var.get()))))
+            except (ValueError, tk.TclError):
+                cfg[key] = low
+                var.set(str(low))
+        return cfg
+
+    def _on_music_save_config(self):
+        try:
+            ok = self.js_api.save_music_config(self._collect_music_config())
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        push_toast("✅ 演奏参数已保存" if ok else "❌ 演奏参数保存失败", duration=2.5)
+
+    # ---- 键位编辑 ----
+
+    def _on_music_reset_bindings(self):
+        if not messagebox.askyesno("恢复默认键位",
+                                   "确定把键位绑定恢复成默认的洛克手碟九键吗？"):
+            return
+        try:
+            cfg = self.js_api.reset_music_bindings() or {}
+        except Exception as exc:
+            messagebox.showerror("恢复失败", str(exc))
+            return
+        self._refresh_music_badges(cfg)
+        name = self._selected_music()
+        if name:
+            self._analyze_music(name)
+
+    def _on_music_edit_bindings(self):
+        BindingEditorDialog(self, list(self._music_bindings),
+                            self._on_bindings_edited)
+
+    def _on_bindings_edited(self, bindings: list[dict]):
+        """键位编辑对话框保存后的回调。"""
+        try:
+            ok = self.js_api.save_music_config({"bindings": bindings})
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        if not ok:
+            push_toast("❌ 键位保存失败", duration=3.0)
+            return
+        try:
+            cfg = self.js_api.get_music_config() or {}
+        except Exception:
+            cfg = {}
+        self._refresh_music_badges(cfg)
+        name = self._selected_music()
+        if name:
+            self._analyze_music(name)
+
+    # ---- 演奏控制 ----
+
+    def _on_music_play(self):
+        name = self._selected_music()
+        if not name:
+            push_toast("先选择一首曲谱", duration=2.0)
+            return
+
+        analysis = self._music_analysis
+        if analysis is not None and not analysis.get("ok"):
+            # 验收要求：不能演奏时必须明确指出是哪些音没有绑定按键
+            self._show_missing_notes(analysis)
+            return
+
+        try:
+            status = self.js_api.get_status() or {}
+        except Exception:
+            status = {}
+        if status.get("script_running") or status.get("playback_active"):
+            if not messagebox.askyesno(
+                    "确认演奏",
+                    "当前有脚本或回放在运行。\n开始演奏前会先停止它，且不保留进度。\n\n是否继续？"):
+                return
+            try:
+                self.js_api.stop_current()
+            except Exception:
+                pass
+
+        try:
+            ok = self.js_api.start_music_play(name, self._collect_music_config())
+        except Exception as exc:
+            messagebox.showerror("演奏失败", str(exc))
+            return
+        if ok:
+            self.root.after(200, self.refresh_status)
+
+    def _show_missing_notes(self, analysis: dict):
+        """弹框列出所有没有绑定按键的音。"""
+        missing = analysis.get("missing") or []
+        lines = [f"曲谱：{analysis.get('name', '')}",
+                 f"{analysis.get('summary', '')}", "",
+                 f"以下 {len(missing)} 个音没有绑定按键："]
+        lines.extend(f"  · {item.get('describe', '')}" for item in missing)
+        suggestion = analysis.get("shift_suggestion")
+        if suggestion is not None:
+            lines += ["", f"把移调改成 {suggestion:+d} 半音即可完整演奏。"]
+        else:
+            lines += ["", "没有任何移调量能完整演奏这首曲谱，",
+                      "请在「编辑键位」里为上面这些音补上按键。"]
+        messagebox.showwarning("无法演奏", "\n".join(lines))
+
+    def _on_music_pause(self):
+        try:
+            self.js_api.pause_current()
+        except Exception as exc:
+            messagebox.showerror("暂停失败", str(exc))
+
+    def _on_music_resume(self):
+        try:
+            self.js_api.resume_current()
+        except Exception as exc:
+            messagebox.showerror("继续失败", str(exc))
+
+    def _on_music_stop(self):
+        try:
+            self.js_api.stop_music_play()
+        except Exception as exc:
+            messagebox.showerror("停止失败", str(exc))
+
+    def _update_music_ui(self, status: dict):
+        """同步第五栏的运行状态、进度与按钮可用性。"""
+        try:
+            music = status.get("music") or {}
+            playing = bool(music.get("playing"))
+            paused = bool(music.get("paused"))
+            counting_down = bool(music.get("counting_down"))
+            busy = playing or counting_down
+
+            analysis_ok = bool(self._music_analysis and self._music_analysis.get("ok"))
+            play_text = "▶ 开始演奏" if analysis_ok else "⚠ 无法演奏 · 查看原因"
+            self.btn_music_play.configure(
+                state="disabled" if busy or not self._music_analysis else "normal",
+                text=play_text,
+                style="Primary.TButton" if analysis_ok else "Danger.TButton",
+            )
+            self.btn_music_pause.configure(
+                state="normal" if playing and not paused else "disabled")
+            self.btn_music_resume.configure(
+                state="normal" if playing and paused else "disabled")
+            self.btn_music_stop.configure(state="normal" if busy else "disabled")
+
+            position = float(music.get("position") or 0)
+            duration = float(music.get("duration") or 0)
+            if playing and duration > 0:
+                self._music_progress.set(min(100.0, position / duration * 100))
+            elif not busy:
+                self._music_progress.set(0)
+
+            if counting_down:
+                self._music_run_var.set(f"⏳ 即将开始演奏：{music.get('name') or ''}")
+                color = self.WARNING
+            elif playing:
+                loop_total = int(music.get("loop_total") or 0)
+                loop_text = ("无限" if loop_total == 0 else str(loop_total))
+                self._music_run_var.set(
+                    f"{'⏸' if paused else '●'} 演奏中 · "
+                    f"{int(position)}s / {int(duration)}s · "
+                    f"第 {int(music.get('loop_current') or 1)} 轮 / {loop_text} · "
+                    f"按键 {int(music.get('event_index') or 0)}/{int(music.get('event_total') or 0)}")
+                color = self.WARNING if paused else self.SUCCESS
+            else:
+                self._music_run_var.set("未运行")
+                color = self.TEXT_MUTED
+            self._music_run_label.configure(foreground=color)
+        except Exception:
+            pass
+
     # ── 刷新逻辑 ──────────────────────────────────
 
     def refresh_scripts(self):
@@ -1655,6 +2465,9 @@ class _DesktopWindow:
 
         script_running = bool(status.get("script_running"))
         script_paused = bool(status.get("script_paused"))
+        music_status = status.get("music") or {}
+        music_playing = bool(music_status.get("playing"))
+        music_paused = bool(music_status.get("paused"))
 
         countdown = status.get("countdown")
         countdown_label = status.get("countdown_label")
@@ -1662,6 +2475,12 @@ class _DesktopWindow:
             label = countdown_label or "即将启动"
             status_text = f"{label} ({countdown}s)"
             status_color = self.WARNING
+        elif music_playing and music_paused:
+            status_text = "演奏已暂停"
+            status_color = self.WARNING
+        elif music_playing:
+            status_text = f"MIDI 演奏中：{music_status.get('name') or ''}".rstrip("：")
+            status_color = self.SUCCESS
         elif script_running and script_paused:
             status_text = "脚本已暂停"
             status_color = self.WARNING
@@ -1737,10 +2556,14 @@ class _DesktopWindow:
         # ---- 第四栏：窗口区域连点状态 ----
         self._update_region_ui(status)
 
+        # ---- 第五栏：MIDI 自动演奏状态 ----
+        self._update_music_ui(status)
+
         # ---- 暂停/继续/停止 按钮状态管理 ----
-        # 判断当前是否有东西在运行（脚本或回放）
-        something_running = script_running or playback_active
-        something_paused = (script_running and script_paused) or playback_paused
+        # 判断当前是否有东西在运行（脚本、回放或 MIDI 演奏）
+        something_running = script_running or playback_active or music_playing
+        something_paused = ((script_running and script_paused) or playback_paused
+                            or music_paused)
 
         if something_paused:
             # 暂停状态：继续可用，暂停禁用，停止可用
@@ -1823,6 +2646,7 @@ class _DesktopWindow:
 
     def refresh_all(self):
         self.refresh_scripts()
+        self.refresh_music_scores()
         self.refresh_status()
 
     def _refresh_loop(self):
