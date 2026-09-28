@@ -6,13 +6,28 @@
 
 ## 启动与运行
 
-### 前置步骤
+### 前置步骤：安装驱动（只需一次）
 
-只需要安装一次 Interception 驱动（仓库已附带编译好的 DLL 与安装程序，**不需要自己安装 WDK 或编译 DLL**）。按照 [驱动安装说明](docs/DRIVER_INSTALLATION.md) 操作即可。
+本程序靠 **Interception 驱动**模拟鼠标，首次使用需要装一次驱动（仓库已附带编译好的 DLL 与安装程序，**不需要自己安装 WDK 或编译 DLL**）。
+
+推荐直接双击程序：如果驱动没装，程序会自己弹框问「是否现在自动安装」，点「是」→ 过一次 UAC → 装完问你是否立即重启，全程不用敲任何命令。也可以双击包里的 `install_driver.bat` 单独装。
+
+手动安装的完整步骤见 [驱动安装说明](docs/DRIVER_INSTALLATION.md)。
 
 ### 使用发布包运行
 
-下载并解压发布包后，先以管理员身份运行包内 `driver_installer\install-interception.exe /install`（首次需要，详见 [驱动安装说明](docs/DRIVER_INSTALLATION.md)），然后双击 `run_clicker.vbs` 启动。该 VBS 会在需要时弹出 UAC 提示以提升权限，确认后程序以静默窗口（无控制台）方式运行，适合普通最终用户。
+下载并【完整解压】发布包后，直接双击 `RocoKingdom_Clicker.exe` 即可。
+
+该 exe 由 PyInstaller `--uac-admin` 打包，已内嵌 `requireAdministrator` 清单，**双击就会自动弹 UAC 提权**，不需要任何启动脚本，也没有控制台窗口。
+
+> 旧版本靠 `run_clicker.vbs` 弹 UAC，现已移除：Windows 11 25H2 起 VBScript 被列为「按需功能」并默认关闭，双击 `.vbs` 可能直接没反应。
+
+包内还附带两个可选脚本：
+
+| 文件 | 用途 |
+| --- | --- |
+| `install_driver.bat` | 单独一键安装（或 `/uninstall` 卸载）驱动，自动提权 + 装完问是否重启 |
+| `run_clicker.bat` | 兼容用启动器；源码开发环境下用它提权跑 `Clicker.py` |
 
 ### 开发与调试（源码运行）
 
@@ -43,7 +58,24 @@ run_clicker.bat
   - **全局控制选项**：控制自定义脚本鼠标移动的开关。
   - **输入录制**：录制名输入框 + 录制/保存/取消按钮。
 - **中栏（脚本列表）**：显示 `data/action_scripts/` 下的脚本文件（`⚙` 动作脚本 / `🎙` 录制脚本），点击选择脚本，双击直接执行。下方按钮区：`▶ 执行` / `⏸ 暂停` / `▶ 继续` / `⏹ 停止` / `🗑 删除` / `↻ 刷新`。
-- **右栏（快捷键）**：可自定义 F1-F12 热键设置区 + 当前设置彩色徽章显示。
+- **右栏（快捷键 + 路径算法）**：可自定义 F1-F12 热键设置区 + 当前设置彩色徽章显示；下方为「拟人化路径算法」的策略与参数配置。
+- **第四栏（窗口区域连点）**：四组面板
+  - **目标区域**：区域预设下拉（存为预设 / 删除）、X/Y/宽/高手输框、`📐 拖拽圈选` / `🪟 拾取窗口` / `🎙 录制区域` 三个按钮。
+  - **点击参数**：每点点击次数、点击间隔、按住时长、落点抖动 X/Y、总点击次数与无限循环开关（均支持 ± 扰动）。
+  - **移动参数**：移动耗时、路径步数、最小点距、区域内边距、换点停顿、漂移校正阈值、路径策略与鼠标按键。
+  - **运行控制**：`▶ 开始窗口连点` / `⏸ 暂停` / `▶ 继续` / `⏹ 停止` / `💾 保存参数` / `💾 存为脚本`，并实时显示已点击与已换点次数。
+
+### 窗口区域连点
+
+针对“在一个窗口范围内随机点击”的需求：给定一个屏幕矩形区域，鼠标在区域内随机取点 → 在该点连点 N 次（带完整抖动）→ 用拟人化轨迹移动到下一个随机点 → 循环。
+
+- **区域录制**：`📐 拖拽圈选` 会铺满整个虚拟屏（支持多显示器负坐标），拖框即得矩形；`🪟 拾取窗口` 倒计时 3 秒后自动取光标下窗口的可视边界（DWM 扩展边界，不包含阴影）。`Esc` / 右键取消。
+- **区域预设**：圈选结果可命名保存为预设（`data/clicker_configs/region_presets.json`），下次直接下拉选用；手写脚本也可用 `"region_preset": "预设名"` 引用。
+- **热键录制**：按 `F6`（可自定义）在任何时候直接进入圈选；录制中 / 脚本运行中按下会被拒绝并提示。
+- **路径算法**：点与点之间的移动复用第三栏的 `PathPlanner`（`sine` / `fitts` / `neuromotor` / `straight`），也可在第四栏单独指定策略（`global` = 跟随第三栏）。
+- **相对注入**：全程只发相对位移，不使用绝对坐标，因此多显示器与光标锁定场景都能正常工作，也**不受**全局 `move_mouse` 开关影响（启动时会 toast 说明）。
+- **可中断**：运行中 `F2` 暂停 / 继续、第四栏或中栏的停止按钮均全程生效。
+- **存为脚本**：`💾 存为脚本` 会把当前面板参数落盘为 `data/action_scripts/{名字}.json`，之后可直接在中栏列表里执行。
 
 ### 暂停/继续/停止
 
@@ -61,9 +93,10 @@ run_clicker.bat
 | 功能 | 默认按键 |
 |------|---------|
 | 暂停/继续 | F2 |
+| 录制区域（圈选） | F6 |
 | 开始录制 | F7 |
 | 停止录制并保存 | F8 |
-| 取消录制 | F10 |
+| 取消录制 | F9 |
 | 标记锚点（录制中） | F12 |
 
 在右栏快捷键面板的下拉框中修改后点击"保存热键设置"即可。配置持久化到 `data/clicker_configs/hotkeys.json`，重启后生效。不同功能不能使用同一个按键，冲突时会提示具体冲突按键。
@@ -90,8 +123,9 @@ run_clicker.bat
 ## 脚本系统
 - 脚本文件位于 `data/action_scripts/`，请按 `SCRIPT_RULES.md` 的格式编写动作序列。
 - 新增动作类型：`timed`，用于在脚本内部指定"运行时长后停止/退出"或其它定时条件。
-- 支持动作类型：`click`, `move`, `key`, `combo`, `wait`, `loop`, `timed`。
-- 类人化选项（抖动）：`x_jitter_px`, `y_jitter_px`, `hold_jitter_ms`, `duration_jitter_ms`, `pause_jitter_ms`。
+- 新增动作类型：`region_click`，用于在一个矩形区域内随机取点连点并用拟人轨迹在点间移动（对应 GUI 第四栏）。
+- 支持动作类型：`click`, `move`, `key`, `combo`, `wait`, `loop`, `timed`, `region_click`。
+- 类人化选项（抖动）：`x_jitter_px`, `y_jitter_px`, `hold_jitter_ms`, `duration_jitter_ms`, `pause_jitter_ms`；`region_click` 额外提供 `clicks_per_spot_jitter`, `interval_jitter_ms`, `move_duration_jitter_ms`, `spot_pause_jitter_ms`。
 
 录制脚本：
 - 通过左栏"输入录制"区录制鼠标移动/点击/键盘事件，保存后生成 `meta.type="recorded"` 的脚本文件。
@@ -142,7 +176,11 @@ run_clicker.bat
   - 说明：`timed` 示例：执行窗口 5s、休眠 2s、重复 2 次；在每个执行窗口内以 `loop` 连续点击并等待，用于展示 `timed` 的基本用法。
   - 用途：学习如何使用 `timed` 包装器实现“工作窗口 + 休眠窗口”的运行模式。
 
-使用提示：在 GUI 中可以直接选择并运行上述脚本；热键支持自定义（见"可自定义热键"章节），默认 F7 开始录制、F8 停止保存、F9 取消录制、F2 暂停/继续。
+- `region_click.json` (`窗口区域连点示例`)
+  - 说明：`region_click` 完整字段示例：在 `(100,200)` 的 800x600 区域内每点点击 3±1 次，点击间隔 120±40ms，按住 80±30ms，换点移动 220±60ms，无限循环。
+  - 用途：学习手写窗口区域连点脚本；把 `region` 换成自己的窗口矩形即可直接使用。
+
+使用提示：在 GUI 中可以直接选择并运行上述脚本；热键支持自定义（见"可自定义热键"章节），默认 F7 开始录制、F8 停止保存、F9 取消录制、F6 录制窗口区域、F2 暂停/继续。
 
 详细动作说明（快速参考）
 
@@ -169,6 +207,11 @@ run_clicker.bat
 - `timed`：在“执行窗口”内重复运行一组动作，窗口到期后进入休眠，再根据 `repeat`/`forever` 决定是否重试。
   - 字段：`type: "timed"`, `execute_ms`（执行窗口 ms）, `sleep_ms`（休眠 ms）, `actions`（在执行窗口内的动作数组），可选 `repeat` 或 `forever`。
   - 行为要点：执行窗口计时会在脚本被暂停时暂停；若某次内部动作超出窗口，动作会完成后再判断是否到期。
+
+- `region_click`：在一个矩形区域内随机取点连点，点间用拟人化轨迹移动（全程相对位移注入）。
+  - 区域三选一：`region: {x,y,width,height}`、扁平的 `region_x/region_y/region_width/region_height`、或 `region_preset: "预设名"`。
+  - 常用字段：`clicks`（0=不限）, `forever`, `clicks_per_spot`(+`_jitter`), `interval_ms`(+`_jitter_ms`), `hold_ms`(+`_jitter_ms`), `move_duration_ms`(+`_jitter_ms`), `margin_px`, `min_spot_distance_px`, `x_jitter_px`/`y_jitter_px`, `spot_pause_ms`(+`_jitter_ms`), `path_strategy`, `path_steps`, `button`, `correct_drift_px`, `path_params`。
+  - 行为要点：`path_strategy: "global"` 跟随 GUI 第三栏的路径算法配置；不受全局 `move_mouse` 开关影响；宽或高 ≤ 0 时该动作被忽略并记 warning。
 
 快速示例（timed）：
 
@@ -198,17 +241,19 @@ run_clicker.bat
 .\build_release.bat
 ```
 
-- 构建脚本要点：使用 `PyInstaller --onedir --windowed` 生成无控制台窗口的发布目录，并把 `run_clicker.vbs` 复制进 `dist\\RocoKingdom_Clicker`，便于用户双击启动（同时包含示例脚本与默认配置）。
+- 构建脚本要点：使用 `PyInstaller --onedir --windowed --uac-admin` 生成无控制台窗口、**双击即自动弹 UAC** 的发布目录（`--uac-admin` 就是 `run_clicker.vbs` 的替代品），并把 `run_clicker.bat` / `install_driver.bat` 复制进 `dist\\RocoKingdom_Clicker`（同时包含示例脚本与默认配置）。
 
 ## 调试与常见问题
-- 如果在游戏中无法捕获热键，请以**管理员身份**重启 `run_clicker.vbs`（VBS 已支持弹出 UAC 提示以提升权限）。
+- 如果在游戏中无法捕获热键，确认程序是**以管理员身份**运行的（发布包 exe 已内嵌提权清单，源码运行请走 `run_clicker.bat`）。
+- 启动时弹「驱动未就绪」：点「是」让程序自动装驱动，装完**必须重启电脑**；若已装过驱动仍报错，通常就是还没重启。也可单独跑 `install_driver.bat`。
+- 提示「找不到 interception.dll」：这是发布包不完整，重装驱动没用，请重新下载并【完整解压】（不要在压缩包内直接双击）。
 - 要查看详细日志，可在开发模式下运行 `python Clicker.py`（不加 `--gui`）以输出控制台日志。
-- 热键配置失效或想恢复默认：删除 `data/clicker_configs/hotkeys.json` 后重启程序即可恢复默认配置（F2 暂停/继续、F7 开始录制、F8 停止保存、F10 取消、F12 标记锚点）。
+- 热键配置失效或想恢复默认：删除 `data/clicker_configs/hotkeys.json` 后重启程序即可恢复默认配置（F2 暂停/继续、F6 录制区域、F7 开始录制、F8 停止保存、F9 取消、F12 标记锚点）。
 - 修改热键后按钮 label 会自动更新（如 `⏸ 暂停 (F3)`）；若未更新，点击"保存热键设置"按钮触发刷新。
 
 ## 更新日志与贡献
-- 最新变更记录请见：[docs/changelog/2026-07-20.md](docs/changelog/2026-07-20.md)
-- 历史变更：[docs/changelog/2026-06-29.md](docs/changelog/2026-06-29.md) | [docs/changelog/2026-06-21.md](docs/changelog/2026-06-21.md)
+- 最新变更记录请见：[docs/changelog/2026-09-27.md](docs/changelog/2026-09-27.md)
+- 历史变更：[docs/changelog/2026-07-20.md](docs/changelog/2026-07-20.md) | [docs/changelog/2026-06-29.md](docs/changelog/2026-06-29.md) | [docs/changelog/2026-06-21.md](docs/changelog/2026-06-21.md)
 - 欢迎提交 issue 或 PR，描述你的使用场景与复现步骤。
 
 ---
@@ -254,7 +299,7 @@ run_clicker.bat
 
 ## 许可协议 (Licensing)
 
-本项目的**原创代码**（项目根目录下的 `*.py`、`*.bat`、`*.vbs`、`*.md`、`data/`、`docs/` 等非第三方的非二进制文件）采用 **MIT License** 发布，完整文本见 [LICENSE](LICENSE)。
+本项目的**原创代码**（项目根目录下的 `*.py`、`*.bat`、`*.md`、`data/`、`docs/` 等非第三方的非二进制文件）采用 **MIT License** 发布，完整文本见 [LICENSE](LICENSE)。
 
 本项目**动态链接**了第三方库 **Interception**（<https://github.com/oblitum/Interception>），该库采用 **GNU Lesser General Public License, version 3 (LGPL-3.0)** 授权。Interception 的库文件位于 `third/Interception/`，其原始许可证文件位于 `third/Interception/licenses/`，同时本仓库根目录也附带了完整许可证文本：
 

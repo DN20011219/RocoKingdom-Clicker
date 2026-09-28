@@ -138,6 +138,12 @@ class InterceptionCore:
         self._ctx = None
         self._device = None
         self.init_error: Optional[str] = None
+        # 供上层（DriverInstaller）判断该怎么提示：
+        #   dll_missing         —— interception.dll 根本没找到/加载不了，属打包问题，
+        #                          重装驱动没用，应引导用户重新下载解压
+        #   driver_install_hint —— 失败原因指向「驱动未安装/未重启」，可以走一键安装
+        self.dll_missing: bool = False
+        self.driver_install_hint: bool = False
         self._initialize_interception()
         if self.init_error:
             self.logger.warning("Interception 初始化失败: %s", self.init_error)
@@ -208,13 +214,15 @@ class InterceptionCore:
 
             if lib is None:
                 hint = os.path.join(project_root, "third", "Interception", "library", arch, "interception.dll")
+                self.dll_missing = True
                 self.init_error = (
                     "找不到或无法加载 interception.dll\n"
-                    "可能原因：\n"
-                    "  1) Interception 驱动尚未安装\n"
-                    "  2) DLL 文件缺失或路径不正确\n\n"
-                    f"尝试的架构：{arch}\n最后一次尝试路径：{hint}\n\n"
-                    "请先以管理员身份运行 driver_installer\\install-interception.exe /install 安装驱动，然后重启电脑。"
+                    "这属于程序文件不完整（不是驱动问题，重装驱动也修不好）：\n"
+                    "  1) 发布包用户：请重新下载并【完整解压】到同一个目录，\n"
+                    "     确认 interception.dll 与 RocoKingdom_Clicker.exe 同级\n"
+                    "  2) 源码用户：确认 third\\Interception\\library 下的 DLL 存在\n"
+                    "  3) 若用 32 位 Python 跑 64 位 DLL（或反之）也会加载失败\n\n"
+                    f"尝试的架构：{arch}\n最后一次尝试路径：{hint}"
                 )
                 return
 
@@ -295,18 +303,19 @@ class InterceptionCore:
                 self._ctx = self._lib.interception_create_context()
             except Exception as inner:
                 self._ctx = None
+                self.driver_install_hint = True
                 self.init_error = (
                     "Interception 驱动未就绪：interception_create_context 调用失败。\n\n"
                     f"错误信息：{inner}\n\n"
-                    "请先以管理员身份运行 driver_installer\\install-interception.exe /install 安装驱动，然后重启电脑。"
+                    "通常是驱动尚未安装，或安装后还没有重启电脑。"
                 )
                 return
 
             if not self._ctx:
+                self.driver_install_hint = True
                 self.init_error = (
                     "Interception 驱动未就绪：无法创建上下文（返回 NULL）。\n\n"
-                    "可能是驱动已安装但未重启电脑，或者驱动未正确安装。\n"
-                    "请运行 driver_installer\\install-interception.exe /install 重新安装驱动，然后重启电脑。"
+                    "可能是驱动已安装但未重启电脑，或者驱动未正确安装。"
                 )
                 return
 
@@ -327,10 +336,10 @@ class InterceptionCore:
             self._lib = None
             self._ctx = None
             self._device = None
+            self.driver_install_hint = True
             self.init_error = (
                 "Interception 初始化异常：\n"
-                f"{e}\n\n"
-                "请先以管理员身份运行 driver_installer\\install-interception.exe /install 安装驱动，然后重启电脑。"
+                f"{e}"
             )
 
     def _send_mouse_stroke(self, stroke: InterceptionMouseStroke) -> bool:

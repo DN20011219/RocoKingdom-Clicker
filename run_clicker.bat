@@ -1,6 +1,11 @@
 @echo off
 setlocal
+chcp 65001 >nul
 cd /d "%~dp0"
+
+rem 发布包用户其实不需要这个脚本：RocoKingdom_Clicker.exe 由 PyInstaller
+rem --uac-admin 打包，已内嵌 requireAdministrator 清单，双击就会弹 UAC。
+rem 本脚本主要给源码开发环境（.venv / 系统 Python）做提权启动。
 
 set "EXE=%~dp0RocoKingdom_Clicker.exe"
 set "VENV_PY=%~dp0.venv\Scripts\pythonw.exe"
@@ -27,7 +32,8 @@ if not exist "%DLL%" (
 
 if not exist "%INSTALLER%" (
     echo 【警告】未找到驱动安装程序：driver_installer\install-interception.exe
-    echo    程序仍然会尝试启动，但如果驱动未安装，会再次弹出提示。
+    echo    程序仍然会尝试启动，但如果驱动未安装，会弹出一键安装对话框。
+    echo    也可以直接双击同目录下的 install_driver.bat 安装驱动。
     echo.
 )
 
@@ -35,7 +41,8 @@ rem ---- 关于驱动预检 ----
 rem 能否使用驱动，取决于“能否创建上下文并注入/读取”，只有加载 DLL 后才能判断。
 rem bat 无法可靠预检：Interception 并不注册名为 interception 的服务（它以 keyboard.sys /
 rem mouse.sys 类过滤驱动形式安装），sc query interception 会在驱动正常时也返回 1060（假阴性）。
-rem 权威检测在程序启动时进行：Clicker.py 的 probe.is_ready() 失败会弹框提示安装驱动。
+rem 权威检测在程序启动时进行：Clicker.py 的 probe.is_ready() 失败会弹一键安装对话框，
+rem 具体逻辑见 DriverInstaller.py。
 
 title RocoKingdom Clicker
 color 0A

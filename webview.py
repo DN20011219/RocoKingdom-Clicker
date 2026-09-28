@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 import queue
+
+from RegionSelector import RegionSelector, format_region
 
 
 # ──────────────────────────────────────────────
@@ -105,7 +107,7 @@ class _DesktopWindow:
         self.root = tk.Tk()
         self.root.title(title)
         self.root.geometry(f"{width}x{height}")
-        self.root.minsize(1720, 900)
+        self.root.minsize(2260, 900)
         self.root.configure(bg=self.BG)
 
         self.status_var = tk.StringVar(value="准备就绪")
@@ -219,6 +221,7 @@ class _DesktopWindow:
         body.columnconfigure(0, weight=3)
         body.columnconfigure(1, weight=5)
         body.columnconfigure(2, weight=3)
+        body.columnconfigure(3, weight=3)
         body.rowconfigure(0, weight=1)
 
         # ── 左栏：状态与控制（内含三组） ─────────────────────────
@@ -476,6 +479,7 @@ class _DesktopWindow:
             "start_recording": "开始录制",
             "stop_recording": "停止录制并保存",
             "cancel_recording": "取消录制",
+            "record_region": "录制区域（圈选）",
             "mark_anchor": "标记锚点（录制中）",
         }
         for key_name, label_text in self._hotkey_labels.items():
@@ -578,6 +582,11 @@ class _DesktopWindow:
 
         # 初始化路径扰动配置
         self._init_path_planner()
+
+        # ── 第四栏：窗口区域连点 ─────────────────────────
+        right2 = ttk.Frame(body)
+        right2.grid(row=0, column=3, sticky="nsew", padx=(12, 0))
+        self._build_region_panel(right2)
 
         footer = ttk.Frame(self.root, padding=(22, 0, 22, 16))
         footer.pack(fill="x")
@@ -993,6 +1002,588 @@ class _DesktopWindow:
             if not silent:
                 messagebox.showerror("保存失败", str(exc))
 
+    # ── 第四栏：窗口区域连点 ──────────────────────
+
+    # (key, 标签, 抖动 key 或 None)
+    _RC_CLICK_ROWS = [
+        ("clicks_per_spot", "每点点击次数", "clicks_per_spot_jitter"),
+        ("interval_ms", "点击间隔 (ms)", "interval_jitter_ms"),
+        ("hold_ms", "按住时长 (ms)", "hold_jitter_ms"),
+        ("x_jitter_px", "落点抖动 X (px)", None),
+        ("y_jitter_px", "落点抖动 Y (px)", None),
+    ]
+    _RC_MOVE_ROWS = [
+        ("move_duration_ms", "移动耗时 (ms)", "move_duration_jitter_ms"),
+        ("path_steps", "路径步数 (0=自动)", None),
+        ("min_spot_distance_px", "最小点距 (px)", None),
+        ("margin_px", "区域内边距 (px)", None),
+        ("spot_pause_ms", "换点停顿 (ms)", "spot_pause_jitter_ms"),
+        ("correct_drift_px", "漂移校正阈值 (0=关)", None),
+    ]
+    _RC_STRATEGIES = ["global", "sine", "fitts", "neuromotor", "straight"]
+    _RC_BUTTONS = ["left", "right", "middle"]
+    _RC_NO_PRESET = "— 无 —"
+
+    def _make_scrollable(self, parent):
+        """返回一个可垂直滚动的内层 Frame（第四栏控件较多）。"""
+        canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        inner.bind("<Configure>", _on_inner_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfigure(inner_id, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_wheel(event):
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        # 仅在鼠标进入第四栏时接管滚轮，避免劫持其他区域
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        return inner
+
+    def _build_region_panel(self, parent):
+        """构建第四栏「窗口区域连点」面板。"""
+        panel = self._make_scrollable(parent)
+
+        self._rc_vars: dict[str, tk.StringVar] = {}
+        self._rc_entries: dict[str, tk.Entry] = {}
+        self._rc_capture_widgets: list = []
+        self._rc_forever_var = tk.BooleanVar(value=True)
+        self._rc_region_status = tk.StringVar(value="当前区域：未设置")
+        self._rc_run_status = tk.StringVar(value="未运行")
+        self._rc_selector = RegionSelector(self.root)
+
+        # ---- 组 1：目标区域 ----
+        region_frame = ttk.LabelFrame(panel, text="  目标区域  ", padding=12)
+        region_frame.pack(fill="x", pady=(0, 10))
+
+        preset_row = tk.Frame(region_frame, bg=self.BG)
+        preset_row.pack(fill="x", pady=(0, 6))
+        tk.Label(preset_row, text="预设", font=("Segoe UI", 9, "bold"),
+                 fg=self.TEXT, bg=self.BG).pack(side="left", padx=(0, 6))
+        self._rc_preset_var = tk.StringVar(value=self._RC_NO_PRESET)
+        self._rc_preset_combo = ttk.Combobox(
+            preset_row, textvariable=self._rc_preset_var,
+            values=[self._RC_NO_PRESET], state="readonly", width=14,
+            font=("Segoe UI", 9, "bold"))
+        self._rc_preset_combo.pack(side="left", fill="x", expand=True)
+        self._rc_preset_combo.bind("<<ComboboxSelected>>",
+                                   self._on_region_preset_selected)
+        self._rc_capture_widgets.append(self._rc_preset_combo)
+
+        btn_row = tk.Frame(region_frame, bg=self.BG)
+        btn_row.pack(fill="x", pady=(0, 8))
+        ttk.Button(btn_row, text="💾 存为预设",
+                   command=self._on_save_region_preset
+                   ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(btn_row, text="🗑 删除",
+                   command=self._on_delete_region_preset
+                   ).pack(side="left", expand=True, fill="x")
+
+        # X / Y / 宽 / 高（两行两列）
+        xy_grid = tk.Frame(region_frame, bg=self.BG)
+        xy_grid.pack(fill="x", pady=(0, 8))
+        for idx, (key, label) in enumerate([("region_x", "X"), ("region_y", "Y"),
+                                            ("region_width", "宽"),
+                                            ("region_height", "高")]):
+            r, c = divmod(idx, 2)
+            cell = tk.Frame(xy_grid, bg=self.BG)
+            cell.grid(row=r, column=c, sticky="ew", padx=(0, 6), pady=2)
+            tk.Label(cell, text=label, font=("Segoe UI", 9), fg=self.TEXT_MUTED,
+                     bg=self.BG, width=2, anchor="w").pack(side="left")
+            var = tk.StringVar(value="0")
+            self._rc_vars[key] = var
+            entry = tk.Entry(cell, textvariable=var, width=8,
+                             font=("Segoe UI", 9, "bold"), bg=self.CARD_BG,
+                             fg=self.TEXT, insertbackground=self.TEXT,
+                             relief="flat", bd=0, justify="right")
+            entry.pack(side="left", fill="x", expand=True)
+            self._rc_entries[key] = entry
+        xy_grid.columnconfigure(0, weight=1)
+        xy_grid.columnconfigure(1, weight=1)
+
+        cap_row = tk.Frame(region_frame, bg=self.BG)
+        cap_row.pack(fill="x", pady=(0, 6))
+        for text, mode in (("📐 拖拽圈选", "drag"), ("🪟 拾取窗口", "window")):
+            btn = ttk.Button(cap_row, text=text,
+                             command=lambda m=mode: self._start_region_capture(m))
+            btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
+            self._rc_capture_widgets.append(btn)
+        hotkey_btn = ttk.Button(cap_row, text="🎙 录制区域",
+                                command=self._on_record_region_request)
+        hotkey_btn.pack(side="left", expand=True, fill="x")
+        self._rc_capture_widgets.append(hotkey_btn)
+        self._rc_record_btn = hotkey_btn
+
+        tk.Label(region_frame, textvariable=self._rc_region_status,
+                 font=("Segoe UI", 9), fg=self.TEXT_MUTED, bg=self.BG,
+                 anchor="w", justify="left").pack(fill="x")
+
+        # ---- 组 2：点击参数 ----
+        click_frame = ttk.LabelFrame(panel, text="  点击参数  ", padding=12)
+        click_frame.pack(fill="x", pady=(0, 10))
+        # 数值行用 grid、总次数行用 pack：Tkinter 禁止同一容器混用两种布局，
+        # 因此把 grid 行收进一个子 Frame
+        click_rows = tk.Frame(click_frame, bg=self.BG)
+        click_rows.pack(fill="x")
+        for row_idx, (key, label, jkey) in enumerate(self._RC_CLICK_ROWS):
+            self._rc_add_row(click_rows, row_idx, label, key, jkey)
+
+        total_row = tk.Frame(click_frame, bg=self.BG)
+        total_row.pack(fill="x", pady=(8, 0))
+        tk.Label(total_row, text="总点击次数 (0=无限)", font=("Segoe UI", 9),
+                 fg=self.TEXT, bg=self.BG).pack(side="left")
+        clicks_var = tk.StringVar(value="0")
+        self._rc_vars["clicks"] = clicks_var
+        clicks_entry = tk.Entry(total_row, textvariable=clicks_var, width=7,
+                                font=("Segoe UI", 9, "bold"), bg=self.CARD_BG,
+                                fg=self.TEXT, insertbackground=self.TEXT,
+                                relief="flat", bd=0, justify="right")
+        clicks_entry.pack(side="left", padx=(8, 8))
+        self._rc_entries["clicks"] = clicks_entry
+        ttk.Checkbutton(total_row, text="无限循环",
+                        variable=self._rc_forever_var,
+                        command=self._on_rc_forever_toggle).pack(side="left")
+
+        # ---- 组 3：移动参数 ----
+        move_frame = ttk.LabelFrame(panel, text="  移动参数  ", padding=12)
+        move_frame.pack(fill="x", pady=(0, 10))
+        row_idx = 0
+        for key, label, jkey in self._RC_MOVE_ROWS:
+            self._rc_add_row(move_frame, row_idx, label, key, jkey)
+            row_idx += 1
+        self._rc_add_combo_row(move_frame, row_idx, "路径策略",
+                               "path_strategy", self._RC_STRATEGIES)
+        row_idx += 1
+        self._rc_add_combo_row(move_frame, row_idx, "鼠标按键",
+                               "button", self._RC_BUTTONS)
+        row_idx += 1
+        tk.Label(move_frame,
+                 text="策略参数（振幅/弧线/过冲等）沿用第三栏『拟人化路径算法』的配置；"
+                      "global = 直接使用第三栏选定的策略。",
+                 font=("Segoe UI", 8), fg=self.TEXT_MUTED, bg=self.BG,
+                 wraplength=300, justify="left", anchor="w"
+                 ).grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        # ---- 组 4：运行控制 ----
+        run_frame = ttk.LabelFrame(panel, text="  运行控制  ", padding=12)
+        run_frame.pack(fill="x")
+        self.btn_rc_start = ttk.Button(run_frame, text="▶ 开始窗口连点",
+                                       style="Primary.TButton",
+                                       command=self._on_start_region_click)
+        self.btn_rc_start.pack(fill="x", pady=(0, 6))
+
+        rc_ctrl = tk.Frame(run_frame, bg=self.BG)
+        rc_ctrl.pack(fill="x", pady=(0, 6))
+        self.btn_rc_pause = ttk.Button(rc_ctrl, text="⏸ 暂停",
+                                       command=self._on_pause, state="disabled")
+        self.btn_rc_pause.pack(side="left", expand=True, fill="x", padx=(0, 4))
+        self.btn_rc_resume = ttk.Button(rc_ctrl, text="▶ 继续",
+                                        command=self._on_resume, state="disabled")
+        self.btn_rc_resume.pack(side="left", expand=True, fill="x", padx=(0, 4))
+        self.btn_rc_stop = ttk.Button(rc_ctrl, text="⏹ 停止",
+                                      style="Danger.TButton",
+                                      command=self._on_stop_region_click,
+                                      state="disabled")
+        self.btn_rc_stop.pack(side="left", expand=True, fill="x")
+
+        rc_save = tk.Frame(run_frame, bg=self.BG)
+        rc_save.pack(fill="x", pady=(0, 8))
+        ttk.Button(rc_save, text="💾 保存参数",
+                   command=self._on_save_region_config
+                   ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(rc_save, text="💾 存为脚本",
+                   command=self._on_save_region_as_script
+                   ).pack(side="left", expand=True, fill="x")
+
+        self._rc_run_label = tk.Label(run_frame, textvariable=self._rc_run_status,
+                                      font=("Segoe UI", 9, "bold"),
+                                      fg=self.TEXT_MUTED, bg=self.BG,
+                                      anchor="w", justify="left")
+        self._rc_run_label.pack(fill="x")
+
+        self._init_region_click()
+
+    def _rc_add_row(self, parent, row_idx: int, label: str, key: str,
+                    jitter_key: str | None = None):
+        """添加一行：标签 | 输入框 | （可选）±抖动输入框。"""
+        tk.Label(parent, text=label, font=("Segoe UI", 9), fg=self.TEXT,
+                 bg=self.BG, anchor="w"
+                 ).grid(row=row_idx, column=0, sticky="w", pady=2, padx=(0, 6))
+
+        var = self._rc_vars.get(key)
+        if var is None:
+            var = tk.StringVar(value="0")
+            self._rc_vars[key] = var
+        entry = tk.Entry(parent, textvariable=var, width=8,
+                         font=("Segoe UI", 9, "bold"), bg=self.CARD_BG,
+                         fg=self.TEXT, insertbackground=self.TEXT,
+                         relief="flat", bd=0, justify="right")
+        entry.grid(row=row_idx, column=1, sticky="e", pady=2)
+        self._rc_entries[key] = entry
+
+        if jitter_key:
+            jvar = self._rc_vars.get(jitter_key)
+            if jvar is None:
+                jvar = tk.StringVar(value="0")
+                self._rc_vars[jitter_key] = jvar
+            jcell = tk.Frame(parent, bg=self.BG)
+            jcell.grid(row=row_idx, column=2, sticky="e", pady=2, padx=(6, 0))
+            tk.Label(jcell, text="±", font=("Segoe UI", 9),
+                     fg=self.TEXT_MUTED, bg=self.BG).pack(side="left")
+            jentry = tk.Entry(jcell, textvariable=jvar, width=5,
+                              font=("Segoe UI", 9, "bold"), bg=self.CARD_BG,
+                              fg=self.TEXT, insertbackground=self.TEXT,
+                              relief="flat", bd=0, justify="right")
+            jentry.pack(side="left")
+            self._rc_entries[jitter_key] = jentry
+
+        parent.columnconfigure(0, weight=1)
+
+    def _rc_add_combo_row(self, parent, row_idx: int, label: str, key: str,
+                          values: list):
+        """添加一行：标签 | 下拉选择。"""
+        tk.Label(parent, text=label, font=("Segoe UI", 9), fg=self.TEXT,
+                 bg=self.BG, anchor="w"
+                 ).grid(row=row_idx, column=0, sticky="w", pady=2, padx=(0, 6))
+        var = tk.StringVar(value=values[0])
+        self._rc_vars[key] = var
+        combo = ttk.Combobox(parent, textvariable=var, values=values,
+                             state="readonly", width=12,
+                             font=("Segoe UI", 9, "bold"))
+        combo.grid(row=row_idx, column=1, columnspan=2, sticky="e", pady=2)
+        parent.columnconfigure(0, weight=1)
+
+    # 参与收集/回填的整数字段
+    _RC_INT_KEYS = (
+        "region_x", "region_y", "region_width", "region_height",
+        "clicks", "clicks_per_spot", "clicks_per_spot_jitter",
+        "interval_ms", "interval_jitter_ms", "hold_ms", "hold_jitter_ms",
+        "move_duration_ms", "move_duration_jitter_ms", "margin_px",
+        "min_spot_distance_px", "x_jitter_px", "y_jitter_px",
+        "spot_pause_ms", "spot_pause_jitter_ms", "path_steps", "correct_drift_px",
+    )
+
+    def _init_region_click(self):
+        """从配置加载区域连点参数到第四栏控件。"""
+        try:
+            cfg = self.js_api.get_region_click_config() or {}
+        except Exception:
+            cfg = {}
+        for key in self._RC_INT_KEYS:
+            var = self._rc_vars.get(key)
+            if var is None or key not in cfg:
+                continue
+            try:
+                var.set(str(int(cfg[key])))
+            except (TypeError, ValueError):
+                pass
+        if cfg.get("path_strategy") in self._RC_STRATEGIES:
+            self._rc_vars["path_strategy"].set(cfg["path_strategy"])
+        if cfg.get("button") in self._RC_BUTTONS:
+            self._rc_vars["button"].set(cfg["button"])
+        self._rc_forever_var.set(bool(cfg.get("forever", True)))
+        self._on_rc_forever_toggle()
+        self._refresh_region_presets(select=str(cfg.get("region_preset") or ""))
+        self._refresh_region_status_label()
+
+    def _on_rc_forever_toggle(self):
+        """勾选无限循环时禁用总次数输入框。"""
+        entry = self._rc_entries.get("clicks")
+        if entry is None:
+            return
+        disabled = bool(self._rc_forever_var.get())
+        try:
+            entry.configure(state="disabled" if disabled else "normal",
+                            fg=self.TEXT_MUTED if disabled else self.TEXT)
+        except Exception:
+            pass
+
+    def _rc_flash_invalid(self, key: str):
+        """非法输入框瞬时红框提示。"""
+        entry = self._rc_entries.get(key)
+        if entry is None:
+            return
+        try:
+            entry.configure(highlightthickness=1, highlightbackground=self.DANGER)
+            self.root.after(1600,
+                            lambda e=entry: e.configure(highlightthickness=0))
+        except Exception:
+            pass
+
+    def _collect_region_config(self, require_region: bool = True):
+        """从输入框收集区域连点参数；非法值红框提示并返回 None。"""
+        cfg: dict = {}
+        bad_key = None
+        for key in self._RC_INT_KEYS:
+            var = self._rc_vars.get(key)
+            if var is None:
+                continue
+            try:
+                cfg[key] = int(float(var.get()))
+            except (ValueError, tk.TclError):
+                if bad_key is None:
+                    bad_key = key
+                cfg[key] = 0
+        if bad_key:
+            self._rc_flash_invalid(bad_key)
+            push_toast(f"❌ 「{bad_key}」不是合法整数", duration=3.0)
+            return None
+
+        cfg["forever"] = bool(self._rc_forever_var.get())
+        strategy = self._rc_vars.get("path_strategy")
+        cfg["path_strategy"] = (strategy.get() if strategy else "global")
+        if cfg["path_strategy"] not in self._RC_STRATEGIES:
+            cfg["path_strategy"] = "global"
+        button = self._rc_vars.get("button")
+        cfg["button"] = (button.get() if button else "left")
+        if cfg["button"] not in self._RC_BUTTONS:
+            cfg["button"] = "left"
+        preset = self._rc_preset_var.get()
+        cfg["region_preset"] = "" if preset == self._RC_NO_PRESET else preset
+
+        if require_region and not cfg["region_preset"]:
+            if cfg["region_width"] <= 0 or cfg["region_height"] <= 0:
+                push_toast("❌ 请先圈选区域或填写宽度/高度", duration=3.0)
+                return None
+        return cfg
+
+    def _current_region(self):
+        """读取输入框里的区域（尺寸非法返回 None）。"""
+        try:
+            x = int(float(self._rc_vars["region_x"].get()))
+            y = int(float(self._rc_vars["region_y"].get()))
+            w = int(float(self._rc_vars["region_width"].get()))
+            h = int(float(self._rc_vars["region_height"].get()))
+        except (KeyError, ValueError, tk.TclError):
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        return {"x": x, "y": y, "width": w, "height": h}
+
+    def _apply_region(self, region):
+        """把区域字典回填到 X/Y/宽/高 输入框并刷新状态标签。"""
+        if not region:
+            return
+        for key, src in (("region_x", "x"), ("region_y", "y"),
+                         ("region_width", "width"), ("region_height", "height")):
+            var = self._rc_vars.get(key)
+            if var is None:
+                continue
+            try:
+                var.set(str(int(region.get(src, 0))))
+            except (TypeError, ValueError):
+                var.set("0")
+        self._refresh_region_status_label()
+
+    def _refresh_region_status_label(self):
+        region = self._current_region()
+        if region:
+            self._rc_region_status.set(f"当前区域：{format_region(region)}")
+        else:
+            self._rc_region_status.set("当前区域：未设置")
+
+    def _refresh_region_presets(self, select: str = ""):
+        """刷新预设下拉框（保留当前选中项）。"""
+        try:
+            names = list(self.js_api.list_region_presets() or [])
+        except Exception:
+            names = []
+        values = [self._RC_NO_PRESET] + names
+        try:
+            self._rc_preset_combo.configure(values=values)
+        except Exception:
+            return
+        if select and select in names:
+            self._rc_preset_var.set(select)
+        elif self._rc_preset_var.get() not in values:
+            self._rc_preset_var.set(self._RC_NO_PRESET)
+
+    def _on_region_preset_selected(self, event=None):
+        name = self._rc_preset_var.get()
+        if not name or name == self._RC_NO_PRESET:
+            return
+        try:
+            region = self.js_api.get_region_preset(name)
+        except Exception:
+            region = None
+        if not region:
+            push_toast(f"❌ 预设「{name}」不存在", duration=2.5)
+            return
+        self._apply_region(region)
+        push_toast(f"✓ 已载入预设「{name}」 {format_region(region)}", duration=2.5)
+
+    def _on_save_region_preset(self):
+        region = self._current_region()
+        if not region:
+            push_toast("❌ 请先圈选或填写有效的区域（宽/高需大于 0）", duration=3.0)
+            return
+        current = self._rc_preset_var.get()
+        initial = "" if current == self._RC_NO_PRESET else current
+        name = simpledialog.askstring("存为预设", "预设名称：",
+                                     parent=self.root, initialvalue=initial)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        try:
+            ok = self.js_api.save_region_preset(name, region)
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        if ok:
+            self._refresh_region_presets(select=name)
+
+    def _on_delete_region_preset(self):
+        name = self._rc_preset_var.get()
+        if not name or name == self._RC_NO_PRESET:
+            push_toast("先在下拉框中选择一个预设", duration=2.5)
+            return
+        if not messagebox.askyesno("确认删除", f"确定删除区域预设「{name}」吗？"):
+            return
+        try:
+            ok = self.js_api.delete_region_preset(name)
+        except Exception as exc:
+            messagebox.showerror("删除失败", str(exc))
+            return
+        if ok:
+            self._rc_preset_var.set(self._RC_NO_PRESET)
+            self._refresh_region_presets()
+
+    def _on_record_region_request(self):
+        """「🎙 录制区域」按钮：走与热键完全相同的请求队列路径。"""
+        try:
+            self.js_api.request_region_capture("drag")
+        except Exception as exc:
+            messagebox.showerror("录制失败", str(exc))
+
+    def _start_region_capture(self, mode: str = "drag"):
+        """在主线程启动区域录制（Tk 窗口不可在子线程创建）。"""
+        try:
+            if self._rc_selector.busy:
+                return
+        except Exception:
+            pass
+        if mode == "window":
+            self._rc_selector.pick_window(on_done=self._on_region_captured)
+        else:
+            self._rc_selector.select_by_drag(on_done=self._on_region_captured)
+
+    def _on_region_captured(self, region):
+        """区域录制回调（region 为 None 表示取消或无效）。"""
+        if not region:
+            push_toast("已取消区域录制", duration=2.0)
+            return
+        self._apply_region(region)
+        title = region.get("title")
+        suffix = f"（{title}）" if title else ""
+        push_toast(f"✓ 已录制区域 {format_region(region)}{suffix}", duration=3.0)
+
+    def _on_start_region_click(self):
+        cfg = self._collect_region_config(require_region=True)
+        if cfg is None:
+            return
+        try:
+            ok = self.js_api.start_region_click(cfg)
+        except Exception as exc:
+            messagebox.showerror("启动失败", str(exc))
+            return
+        if ok:
+            self.root.after(200, self.refresh_status)
+
+    def _on_stop_region_click(self):
+        try:
+            self.js_api.stop_region_click()
+        except Exception as exc:
+            messagebox.showerror("停止失败", str(exc))
+
+    def _on_save_region_config(self):
+        cfg = self._collect_region_config(require_region=False)
+        if cfg is None:
+            return
+        try:
+            ok = self.js_api.save_region_click_config(cfg)
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        push_toast("✅ 区域连点参数已保存" if ok else "❌ 参数保存失败", duration=2.5)
+
+    def _on_save_region_as_script(self):
+        cfg = self._collect_region_config(require_region=True)
+        if cfg is None:
+            return
+        name = simpledialog.askstring("存为脚本", "脚本名称：",
+                                     parent=self.root,
+                                     initialvalue="region_click")
+        if not name or not name.strip():
+            return
+        try:
+            ok = self.js_api.save_region_click_as_script(name.strip(), cfg)
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        if ok:
+            self.refresh_scripts()
+
+    def _update_region_ui(self, status: dict):
+        """同步第四栏的运行状态、统计与按钮可用性。"""
+        try:
+            region_active = bool(status.get("region_click_active"))
+            script_running = bool(status.get("script_running"))
+            script_paused = bool(status.get("script_paused"))
+            playback_active = bool(status.get("playback_active"))
+            busy = region_active or script_running or playback_active
+
+            self.btn_rc_start.configure(state="disabled" if busy else "normal")
+            for widget in self._rc_capture_widgets:
+                try:
+                    if busy:
+                        widget.configure(state="disabled")
+                    elif isinstance(widget, ttk.Combobox):
+                        widget.configure(state="readonly")
+                    else:
+                        widget.configure(state="normal")
+                except Exception:
+                    pass
+
+            if region_active and script_paused:
+                self.btn_rc_pause.configure(state="disabled")
+                self.btn_rc_resume.configure(state="normal")
+                self.btn_rc_stop.configure(state="normal")
+            elif region_active:
+                self.btn_rc_pause.configure(state="normal")
+                self.btn_rc_resume.configure(state="disabled")
+                self.btn_rc_stop.configure(state="normal")
+            else:
+                self.btn_rc_pause.configure(state="disabled")
+                self.btn_rc_resume.configure(state="disabled")
+                self.btn_rc_stop.configure(state="disabled")
+
+            total = int(status.get("region_click_total", 0) or 0)
+            spots = int(status.get("region_click_spots", 0) or 0)
+            if region_active:
+                text = f"● 运行中 · 已点击 {total} 次 · 已换点 {spots} 次"
+                color = self.WARNING if script_paused else self.SUCCESS
+            elif total or spots:
+                text = f"已停止 · 本次共点击 {total} 次 · 换点 {spots} 次"
+                color = self.TEXT_MUTED
+            else:
+                text = "未运行"
+                color = self.TEXT_MUTED
+            self._rc_run_status.set(text)
+            self._rc_run_label.configure(foreground=color)
+        except Exception:
+            pass
+
     # ── 刷新逻辑 ──────────────────────────────────
 
     def refresh_scripts(self):
@@ -1143,6 +1734,9 @@ class _DesktopWindow:
         except Exception:
             pass
 
+        # ---- 第四栏：窗口区域连点状态 ----
+        self._update_region_ui(status)
+
         # ---- 暂停/继续/停止 按钮状态管理 ----
         # 判断当前是否有东西在运行（脚本或回放）
         something_running = script_running or playback_active
@@ -1184,6 +1778,8 @@ class _DesktopWindow:
             self.btn_rec_start.configure(text=f"● 录制 ({rec_key})")
             self.btn_rec_stop.configure(text=f"■ 保存 ({stop_key})")
             self.btn_rec_cancel.configure(text=f"✕ 取消 ({cancel_key})")
+            self._rc_record_btn.configure(
+                text=f"🎙 录制区域 ({hotkeys.get('record_region', 'F6')})")
         except Exception:
             pass
 
@@ -1218,9 +1814,11 @@ class _DesktopWindow:
                     pass
 
         # 更新底部快捷键提示
+        region_key = hotkeys.get("record_region", "F6")
         self.footer_var.set(
             f"快捷键：{pause_key} 暂停/继续  |  {rec_key} 开始录制  |  "
-            f"{stop_key} 停止录制并保存  |  {cancel_key} 取消录制"
+            f"{stop_key} 停止录制并保存  |  {cancel_key} 取消录制  |  "
+            f"{region_key} 录制窗口区域"
         )
 
     def refresh_all(self):
@@ -1234,8 +1832,21 @@ class _DesktopWindow:
         if self._refresh_counter >= 4:
             self._refresh_counter = 0
             self.refresh_scripts()
+            self._refresh_region_presets()
         self._drain_toasts()
+        self._drain_region_requests()
         self.root.after(500, self._refresh_loop)
+
+    def _drain_region_requests(self):
+        """排空后台线程投递的区域录制请求（Tk 窗口只能在主线程创建）。"""
+        while True:
+            try:
+                mode = self.js_api.pop_region_request()
+            except Exception:
+                return
+            if not mode:
+                return
+            self._start_region_capture(mode)
 
     def _drain_toasts(self):
         while True:

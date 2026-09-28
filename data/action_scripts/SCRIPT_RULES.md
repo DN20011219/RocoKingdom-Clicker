@@ -181,6 +181,85 @@
 }
 ```
 
+### 7. region_click
+
+`region_click` 是“窗口区域连点”：在一个矩形区域内随机取一个点，在该点连点若干次，然后用拟人化轨迹移动到区域内的下一个随机点，如此循环。
+
+与 `click` / `move` 不同，`region_click` 的鼠标移动**全程使用相对位移注入**（不发绝对坐标），因此天然支持多显示器与光标被锁定的场景，也**不受**全局“启动时移动鼠标”开关影响。
+
+#### 区域写法（三选一）
+
+1. 内联对象（推荐）：
+
+```json
+{"region": {"x": 100, "y": 200, "width": 800, "height": 600}}
+```
+
+   `width` / `height` 也可以写成 `w` / `h`。
+
+2. 扁平字段：
+
+```json
+{"region_x": 100, "region_y": 200, "region_width": 800, "region_height": 600}
+```
+
+3. 引用区域预设（预设在 GUI 第四栏圈选后保存，落盘于 `data/clicker_configs/region_presets.json`）：
+
+```json
+{"region_preset": "洛克王国窗口"}
+```
+
+宽或高 ≤ 0 时该动作会被忽略，并写一条 warning 日志。
+
+#### 字段
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `region` / `region_x`… / `region_preset` | — | 目标区域，见上文三种写法 |
+| `clicks` | `0` | 总点击次数上限，`0` = 不限 |
+| `forever` | `true` | 是否无限循环（写了 `clicks > 0` 时默认变为 `false`） |
+| `clicks_per_spot` | `3` | 在同一个点点击多少次后才换点 |
+| `clicks_per_spot_jitter` | `1` | 上者的 ± 随机扰动 |
+| `interval_ms` | `120` | 同一点内两次点击的间隔 |
+| `interval_jitter_ms` | `40` | 点击间隔的 ± 扰动 |
+| `hold_ms` | `80` | 单次点击按住时长 |
+| `hold_jitter_ms` | `30` | 按住时长的 ± 扰动 |
+| `move_duration_ms` | `220` | 两个随机点之间的移动耗时 |
+| `move_duration_jitter_ms` | `60` | 移动耗时的 ± 扰动 |
+| `margin_px` | `8` | 区域内边距，避免取点贴边 |
+| `min_spot_distance_px` | `40` | 相邻两个随机点的最小距离 |
+| `x_jitter_px` / `y_jitter_px` | `3` / `3` | 单次点击的落点抖动 |
+| `spot_pause_ms` | `0` | 换点之后的额外停顿 |
+| `spot_pause_jitter_ms` | `0` | 换点停顿的 ± 扰动 |
+| `path_strategy` | `global` | `global`（跟随 GUI 第三栏配置）/ `sine` / `fitts` / `neuromotor` / `straight` |
+| `path_steps` | `0` | 路径采样步数，`0` = 按移动耗时自动推算 |
+| `button` | `left` | `left` / `right` / `middle` |
+| `correct_drift_px` | `4` | 漂移校正阈值，实际光标与目标点误差超过它就补一次相对移动；`0` = 关闭 |
+| `path_params` | `{}` | 覆盖路径算法参数，键名同 `data/clicker_configs/path_planner.json` |
+
+`path_strategy` 为 `global` 时使用 `path_planner.json` 里保存的策略与参数（振幅、弧线、过冲、神经运动噪声等）；`path_params` 可以只覆盖其中几个键。
+
+#### 最小示例
+
+```json
+{
+  "type": "region_click",
+  "region": {"x": 100, "y": 200, "width": 800, "height": 600},
+  "forever": true,
+  "clicks_per_spot": 3,
+  "interval_ms": 120,
+  "move_duration_ms": 220,
+  "path_strategy": "fitts"
+}
+```
+
+#### 行为要点
+
+- 启动时先读取当前光标位置，用与后续相同的相对轨迹移动到区域内第一个随机点，不做瞬移。
+- 每个点的落点抖动通过“微移 → 按下 → 抬起 → 反向补偿”实现，多次点击的抖动彼此独立，但基准点不会随机游走。
+- `F2` 暂停 / 继续与停止按钮全程生效（换点、点击间隔、移动过程都可中断）。
+- 完整示例见同目录的 `region_click.json`。
+
 ## 脚本会话热键
 
 选择脚本后会进入脚本会话模式：
@@ -227,5 +306,6 @@
 
 - 坐标使用的是屏幕像素坐标
 - `click` 和 `move` 最终都会被转换成 Interception 绝对坐标
+- `region_click` 例外：它只使用相对位移注入，多显示器与光标锁定场景都能正常工作
 - JSON 语法必须正确，少一个逗号都会导致加载失败
 - 建议每次修改后先保存，再回到程序里重新打开脚本列表

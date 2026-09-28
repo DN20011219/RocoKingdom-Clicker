@@ -9,13 +9,23 @@ if (-not (Test-Path (Join-Path $Dist 'RocoKingdom_Clicker.exe'))) {
 }
 
 Write-Host "Copying top-level files (run scripts, README, LICENSE, GPL, LGPL)..."
-@('run_clicker.bat', 'run_clicker.vbs', 'README.md', 'LICENSE', 'COPYING', 'COPYING.LESSER') | ForEach-Object {
+# run_clicker.vbs 已移除：Windows 11 25H2 起 VBScript 默认被禁用，不能再用它弹 UAC。
+# 提权改由 PyInstaller --uac-admin 内嵌进 RocoKingdom_Clicker.exe 的 requireAdministrator 清单完成。
+@('run_clicker.bat', 'install_driver.bat', 'README.md', 'LICENSE', 'COPYING', 'COPYING.LESSER') | ForEach-Object {
     $src = Join-Path $Root $_
     if (Test-Path $src) {
         Copy-Item -Path $src -Destination $Dist -Force
     } else {
         Write-Host "  (skipped: $_ not found)"
     }
+}
+
+# 旧发布包里可能残留 run_clicker.vbs，dist 目录复用时必须清掉，
+# 否则用户仍会看到一个双击无反应的死文件。
+$staleVbs = Join-Path $Dist 'run_clicker.vbs'
+if (Test-Path $staleVbs) {
+    Remove-Item -Path $staleVbs -Force
+    Write-Host "  (removed stale: run_clicker.vbs)"
 }
 
 Write-Host "Copying data/ folder (excluding runtime data)..."

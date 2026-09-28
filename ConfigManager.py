@@ -31,6 +31,7 @@ DEFAULT_HOTKEYS = {
     "start_recording": "F7",    # 开始录制
     "stop_recording": "F8",     # 停止录制并保存
     "cancel_recording": "F9",   # 取消录制
+    "record_region": "F6",      # 录制窗口区域（圈选矩形）
     "mark_anchor": "F12",       # 录制时标记锚点
 }
 
@@ -62,8 +63,50 @@ HOTKEY_LABELS = {
     "start_recording": "开始录制",
     "stop_recording": "停止录制并保存",
     "cancel_recording": "取消录制",
+    "record_region": "录制区域（圈选）",
     "mark_anchor": "标记锚点（录制中）",
 }
+
+# 窗口区域连点默认参数（字段与 ActionScript.RegionClickAction 一一对应，全部为扁平标量）
+DEFAULT_REGION_CLICK = {
+    "region_x": 0,
+    "region_y": 0,
+    "region_width": 0,
+    "region_height": 0,
+    "region_preset": "",
+    "clicks": 0,                    # 0 = 不限次数
+    "forever": True,
+    "clicks_per_spot": 3,           # 每个点点击多少次后才移动
+    "clicks_per_spot_jitter": 1,
+    "interval_ms": 120,             # 同一点两次点击的间隔
+    "interval_jitter_ms": 40,
+    "hold_ms": 80,
+    "hold_jitter_ms": 30,
+    "move_duration_ms": 220,        # 两点之间的移动耗时
+    "move_duration_jitter_ms": 60,
+    "margin_px": 8,                 # 区域内边距，避免贴边点击
+    "min_spot_distance_px": 40,     # 相邻两个点的最小距离
+    "x_jitter_px": 3,               # 单次点击的落点抖动
+    "y_jitter_px": 3,
+    "spot_pause_ms": 0,             # 换点后的额外停顿
+    "spot_pause_jitter_ms": 0,
+    "path_strategy": "global",      # global / sine / fitts / neuromotor / straight
+    "path_steps": 0,                # 0 = 按移动耗时自动推算
+    "button": "left",               # left / right / middle
+    "correct_drift_px": 4,          # 0 = 关闭漂移校正
+    # 覆盖全局拟人路径参数（与 RegionClickAction.path_params 对应），
+    # 例如 {"fitts_arc_px": 20.0}；面板不编辑它，可手改本文件生效
+    "path_params": {},
+}
+
+# 区域连点的路径策略合法取值
+REGION_PATH_STRATEGIES = ("global", "sine", "fitts", "neuromotor", "straight")
+
+# 区域连点的鼠标按键合法取值
+REGION_BUTTONS = ("left", "right", "middle")
+
+# CONFIG_DIR 下不属于"用户连点配置"的文件（避免污染 list_configs 的 CLI 菜单）
+NON_CONFIG_FILES = {"hotkeys", "path_planner", "region_click", "region_presets"}
 
 
 class ConfigManager:
@@ -238,6 +281,9 @@ class ConfigManager:
         configs = []
         
         for f in cls.CONFIG_DIR.glob("*.json"):
+            # 排除热键/路径扰动/区域连点等非连点参数文件
+            if f.stem in NON_CONFIG_FILES:
+                continue
             configs.append(f.stem)
         
         return sorted(configs)
@@ -398,4 +444,149 @@ class ConfigManager:
             return True
         except Exception as e:
             cls.logger.error("保存路径扰动配置失败: %s", e)
+            return False
+
+    # ---- 窗口区域连点配置 ----
+
+    REGION_CLICK_FILE = CONFIG_DIR / "region_click.json"
+    REGION_PRESETS_FILE = CONFIG_DIR / "region_presets.json"
+
+    @classmethod
+    def load_region_click(cls) -> dict:
+        """加载窗口区域连点参数，返回完整参数字典（缺失项用默认值）。"""
+        cls.ensure_config_dir()
+        config = dict(DEFAULT_REGION_CLICK)
+        if cls.REGION_CLICK_FILE.exists():
+            try:
+                with open(cls.REGION_CLICK_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                for key, default in DEFAULT_REGION_CLICK.items():
+                    if key not in data:
+                        continue
+                    value = data[key]
+                    # 按默认值的类型做强转，脏数据保持默认值
+                    if isinstance(default, bool):
+                        config[key] = bool(value)
+                    elif isinstance(default, int):
+                        try:
+                            config[key] = int(value)
+                        except (TypeError, ValueError):
+                            continue
+                    elif isinstance(default, str):
+                        config[key] = str(value)
+                    elif isinstance(default, dict):
+                        if isinstance(value, dict):
+                            config[key] = dict(value)
+                if config["path_strategy"] not in REGION_PATH_STRATEGIES:
+                    config["path_strategy"] = DEFAULT_REGION_CLICK["path_strategy"]
+                if config["button"] not in REGION_BUTTONS:
+                    config["button"] = DEFAULT_REGION_CLICK["button"]
+                cls.logger.info("区域连点配置已从 %s 加载", cls.REGION_CLICK_FILE)
+            except Exception as e:
+                cls.logger.warning("加载区域连点配置失败: %s，使用默认配置", e)
+        return config
+
+    @classmethod
+    def save_region_click(cls, config: dict) -> bool:
+        """保存窗口区域连点参数到文件。"""
+        cls.ensure_config_dir()
+        try:
+            # 只保存已知字段
+            data = {}
+            for key in DEFAULT_REGION_CLICK:
+                if key in config:
+                    data[key] = config[key]
+            with open(cls.REGION_CLICK_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            cls.logger.info("区域连点配置已保存到 %s", cls.REGION_CLICK_FILE)
+            return True
+        except Exception as e:
+            cls.logger.error("保存区域连点配置失败: %s", e)
+            return False
+
+    # ---- 区域预设（录制下来的窗口矩形） ----
+
+    @classmethod
+    def load_region_presets(cls) -> dict:
+        """加载全部区域预设，返回 {name: {x, y, width, height, note}}。"""
+        cls.ensure_config_dir()
+        if not cls.REGION_PRESETS_FILE.exists():
+            return {}
+        try:
+            with open(cls.REGION_PRESETS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            presets = data.get("presets", {})
+            if not isinstance(presets, dict):
+                cls.logger.warning("区域预设文件格式异常，已忽略")
+                return {}
+            return presets
+        except Exception as e:
+            cls.logger.warning("加载区域预设失败: %s", e)
+            return {}
+
+    @classmethod
+    def list_region_presets(cls) -> list:
+        """列出所有区域预设名称（按名称排序）。"""
+        return sorted(cls.load_region_presets().keys())
+
+    @classmethod
+    def get_region_preset(cls, name: str) -> dict | None:
+        """按名称取区域预设，不存在返回 None。"""
+        if not name:
+            return None
+        preset = cls.load_region_presets().get(name)
+        if not isinstance(preset, dict):
+            return None
+        return preset
+
+    @classmethod
+    def save_region_preset(cls, name: str, region: dict, note: str = "") -> bool:
+        """新增/更新一个区域预设。"""
+        name = (name or "").strip()
+        if not name:
+            cls.logger.warning("区域预设名称为空，已忽略保存")
+            return False
+        try:
+            x = int(region.get("x", 0))
+            y = int(region.get("y", 0))
+            width = int(region.get("width", region.get("w", 0)))
+            height = int(region.get("height", region.get("h", 0)))
+        except (TypeError, ValueError):
+            cls.logger.error("区域预设坐标非法: %s", region)
+            return False
+        if width <= 0 or height <= 0:
+            cls.logger.warning("区域预设尺寸非法（%dx%d），已忽略保存", width, height)
+            return False
+
+        cls.ensure_config_dir()
+        try:
+            presets = cls.load_region_presets()
+            presets[name] = {
+                "x": x, "y": y, "width": width, "height": height,
+                "note": str(note or ""),
+            }
+            with open(cls.REGION_PRESETS_FILE, 'w', encoding='utf-8') as f:
+                json.dump({"presets": presets}, f, indent=4, ensure_ascii=False)
+            cls.logger.info("区域预设已保存: %s -> %dx%d @ (%d,%d)", name, width, height, x, y)
+            return True
+        except Exception as e:
+            cls.logger.error("保存区域预设失败: %s", e)
+            return False
+
+    @classmethod
+    def delete_region_preset(cls, name: str) -> bool:
+        """删除一个区域预设。"""
+        presets = cls.load_region_presets()
+        if name not in presets:
+            cls.logger.warning("区域预设不存在: %s", name)
+            return False
+        cls.ensure_config_dir()
+        try:
+            del presets[name]
+            with open(cls.REGION_PRESETS_FILE, 'w', encoding='utf-8') as f:
+                json.dump({"presets": presets}, f, indent=4, ensure_ascii=False)
+            cls.logger.info("区域预设已删除: %s", name)
+            return True
+        except Exception as e:
+            cls.logger.error("删除区域预设失败: %s", e)
             return False

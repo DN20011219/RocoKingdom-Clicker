@@ -301,6 +301,116 @@ class Api:
         except Exception:
             return False
 
+    # ---- 窗口区域连点 API ----
+
+    def get_region_click_config(self) -> dict:
+        """返回当前区域连点参数（含 region_presets 列表）。"""
+        try:
+            return self.manager.get_region_click_config()
+        except Exception:
+            from ConfigManager import DEFAULT_REGION_CLICK
+            cfg = dict(DEFAULT_REGION_CLICK)
+            cfg["region_presets"] = []
+            return cfg
+
+    def save_region_click_config(self, config: dict) -> bool:
+        """保存区域连点参数。"""
+        try:
+            return bool(self.manager.save_region_click_config(config))
+        except Exception:
+            return False
+
+    def list_region_presets(self):
+        """列出所有区域预设名称。"""
+        try:
+            return self.manager.list_region_presets()
+        except Exception:
+            return []
+
+    def get_region_preset(self, name: str):
+        """按名称取区域预设，不存在返回 None。"""
+        try:
+            return self.manager.get_region_preset(name)
+        except Exception:
+            return None
+
+    def save_region_preset(self, name: str, region: dict, note: str = "") -> bool:
+        """保存一个区域预设。"""
+        try:
+            return bool(self.manager.save_region_preset(name, region, note))
+        except Exception:
+            return False
+
+    def delete_region_preset(self, name: str) -> bool:
+        """删除一个区域预设。"""
+        try:
+            return bool(self.manager.delete_region_preset(name))
+        except Exception:
+            return False
+
+    def request_region_capture(self, mode: str = "drag") -> bool:
+        """请求进入区域录制（“drag”=拖拽圈选，“window”=拾取窗口）。
+
+        只投递请求，实际的圈选窗口由 GUI 主线程轮询后创建。
+        """
+        try:
+            self.manager.request_region_capture(mode)
+            return True
+        except Exception:
+            return False
+
+    def pop_region_request(self):
+        """取出一个区域录制请求（无请求返回 None）。"""
+        try:
+            return self.manager.pop_region_request()
+        except Exception:
+            return None
+
+    def start_region_click(self, params=None) -> bool:
+        """启动窗口区域连点（内部已在后台线程运行，不阻塞 UI）。"""
+        try:
+            return bool(self.manager.start_region_click(params))
+        except Exception as e:
+            try:
+                from webview import push_toast
+                push_toast(f"❌ 启动窗口连点失败: {e}", duration=4.0)
+            except Exception:
+                pass
+            return False
+
+    def stop_region_click(self) -> bool:
+        """停止窗口区域连点。"""
+        def worker():
+            try:
+                self.manager.stop_region_click()
+            except Exception as e:
+                try:
+                    from webview import push_toast
+                    push_toast(f"❌ 停止失败: {e}", duration=3.0)
+                except Exception:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def get_region_status(self) -> dict:
+        """返回区域连点的运行状态与统计。"""
+        try:
+            return self.manager.get_region_status()
+        except Exception:
+            return {"active": False, "total_clicks": 0, "spots_visited": 0}
+
+    def save_region_click_as_script(self, script_name: str, params=None) -> bool:
+        """把当前区域连点参数保存为可直接执行的动作脚本。"""
+        try:
+            return bool(self.manager.save_region_click_as_script(script_name, params))
+        except Exception as e:
+            try:
+                from webview import push_toast
+                push_toast(f"❌ 保存脚本失败: {e}", duration=4.0)
+            except Exception:
+                pass
+            return False
+
     def get_status(self):
         cfg = self.manager.clicker.config
         # 仅返回对用户有用的精简字段；在 move_mouse 为 True 时才包含位置信息
@@ -322,6 +432,17 @@ class Api:
             "hold_duration": getattr(cfg, 'hold_duration', None),
             "move_mouse": getattr(cfg, 'move_mouse', True),
         }
+
+        # 区域连点状态与统计
+        try:
+            region_status = self.manager.get_region_status()
+            status["region_click_active"] = bool(region_status.get("active"))
+            status["region_click_total"] = int(region_status.get("total_clicks", 0))
+            status["region_click_spots"] = int(region_status.get("spots_visited", 0))
+        except Exception:
+            status["region_click_active"] = False
+            status["region_click_total"] = 0
+            status["region_click_spots"] = 0
 
         # 回放进度（录制脚本专有）
         pb = getattr(self.manager, "_playback", None)
@@ -397,26 +518,25 @@ def start_gui():
 
     api = Api(manager)
 
-    # 如果 Interception 未就绪，在启动窗口时立即提示一次（避免用户进了界面还不知情）
+    # 如果 Interception 未就绪，在启动窗口前就地引导安装
+    # （正常路径下 Clicker.main() 的 probe 已经拦住了，这里只对应直接跑 gui.py）
     if not manager.clicker.is_ready():
         try:
-            from Clicker import show_message_box
-            msg = (
-                "RocoKingdom Clicker 需要 Interception 驱动才能工作。\n\n"
-                f"{manager.clicker.init_error or '无法加载 interception.dll。'}\n\n"
-                "安装步骤：\n"
-                "  1) 以【管理员身份】运行程序目录下 driver_installer\\install-interception.exe /install\n"
-                "  2) 重启电脑后再运行本程序。\n\n"
-                "（如果只浏览界面，不需要驱动；但点击操作会被拒绝。）"
-            )
-            show_message_box(msg, "驱动未就绪 - RocoKingdom Clicker", error=False)
+            import DriverInstaller
+            from Clicker import _report_driver_not_ready
+
+            outcome = _report_driver_not_ready(manager.clicker, interactive=True)
+            if outcome == DriverInstaller.INSTALL_OK:
+                # 装完必须重启才生效，这时把窗口开出来也点不动，直接收尾退出
+                manager.shutdown()
+                return
         except Exception:
             pass
 
     index_path = (WEB_DIR / 'index.html').as_uri()
 
     # run webview in main thread
-    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=1800, height=1300)
+    webview.create_window('RocoKingdom Clicker', index_path, js_api=api, width=2340, height=1300)
     webview.start()
 
     # webview 窗口关闭后，彻底清理所有后台线程和资源

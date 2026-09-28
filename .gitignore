@@ -9,6 +9,11 @@ build_release_debug.log
 build_release_debug.bat
 build_release_fixed.bat
 data/clicker.log
+_build.log
+
+# Runtime-generated region clicker configs
+data/clicker_configs/region_click.json
+data/clicker_configs/region_presets.json
 
 # Temporary helper scripts
 _finish_release.ps1

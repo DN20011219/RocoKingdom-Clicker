@@ -15,6 +15,7 @@ import traceback
 from pathlib import Path
 import threading
 import argparse
+from dataclasses import fields as dataclass_fields
 
 from InterceptionCore import InterceptionCore
 from ConfigManager import ConfigManager, FKEY_VK, FKEY_SCANCODE, DEFAULT_HOTKEYS, DEFAULT_ANCHOR_MODE
@@ -25,9 +26,11 @@ from ActionScript import (
     MoveAction,
     KeyAction,
     WaitAction,
+    RegionClickAction,
 )
 from InputRecorder import InputRecorder
 from PlaybackEngine import PlaybackEngine
+import DriverInstaller
 
 
 VK_F1 = 0x70
@@ -113,6 +116,40 @@ def show_message_box(text: str, title: str = "RocoKingdom Clicker", error: bool 
 def key_pressed(vk_code: int) -> bool:
     """检测虚拟按键是否被按下。"""
     return bool(ctypes.windll.user32.GetAsyncKeyState(vk_code) & 0x8000)
+
+
+def _report_driver_not_ready(core: InterceptionCore, *, interactive: bool = False) -> str:
+    """按失败原因分类提示驱动未就绪，返回 DriverInstaller 的状态字符串。
+
+    - dll_missing        ：打包/解压不完整，重装驱动没用 → 只提示重新下载
+    - driver_install_hint：驱动未装或没重启 → interactive 时直接走一键安装
+    - 其它（如找不到鼠标设备）：给出具体原因即可
+    """
+    title = "驱动未就绪 - RocoKingdom Clicker"
+    detail = core.init_error or "未知原因"
+
+    if core.dll_missing:
+        show_message_box(
+            f"程序文件不完整，无法工作。\n\n{detail}",
+            "文件缺失 - RocoKingdom Clicker",
+            error=True,
+        )
+        return DriverInstaller.INSTALL_NO_INSTALLER
+
+    if core.driver_install_hint:
+        if interactive:
+            return DriverInstaller.offer_one_click_install(detail, title=title)
+        show_message_box(
+            f"Interception 驱动未就绪，无法执行点击操作。\n\n{detail}\n\n"
+            "请重新运行本程序，在弹出的对话框里选择自动安装；\n"
+            "或双击程序目录里的 install_driver.bat。",
+            title,
+            error=True,
+        )
+        return DriverInstaller.INSTALL_DECLINED
+
+    show_message_box(f"Interception 无法工作。\n\n{detail}", title, error=True)
+    return DriverInstaller.INSTALL_FAILED
 
 
 class GlobalHotkeyListener:
@@ -270,6 +307,9 @@ class ClickerManager:
         self._script_session_thread: threading.Thread | None = None
         self._script_session_stop_event: threading.Event | None = None
         self._script_session_pause_event: threading.Event | None = None
+        # 区域录制请求队列：热键在后台线程触发，Tk 窗口只能在主线程创建，
+        # 所以这里只投递请求，由 GUI 的 _refresh_loop 在主线程排空（与 toast 队列同模式）
+        self._region_request_queue: queue.Queue = queue.Queue()
         # Toast notification callback (set by GUI)
         self._push_toast = push_toast
 
@@ -295,24 +335,29 @@ class ClickerManager:
         self._hotkey_dispatch_thread: threading.Thread | None = None
         self._start_hotkey_dispatch()
 
+        # 驱动未就绪的一键安装引导只主动弹一次（见 _show_driver_warning）
+        self._driver_prompt_done = False
+
         if not self.clicker.is_ready():
             self.logger.warning("Interception 驱动未就绪：%s", self.clicker.init_error)
         self.logger.info("连点器管理器已初始化")
 
     def _show_driver_warning(self):
-        """显示驱动未就绪的 MessageBox（带安装步骤），同时返回 False 方便调用方处理。"""
-        msg = (
-            "Interception 驱动未就绪，无法执行点击操作。\n\n"
-            f"{self.clicker.init_error or '请先安装驱动。'}\n\n"
-            "安装步骤：\n"
-            "  1) 以【管理员身份】运行程序目录下 driver_installer\\install-interception.exe /install\n"
-            "  2) 重启电脑后重新运行本程序。"
-        )
+        """驱动未就绪时的统一提示入口，返回 False 方便调用方直接 return。
+
+        能一键安装的场景直接交给 DriverInstaller 弹「是/否」引导用户装驱动，
+        不再只给一段需要手敲命令的说明。
+        """
         self.logger.warning("驱动未就绪，拒绝执行操作：%s", self.clicker.init_error)
+        # 安装流程会连着弹好几个模态框、甚至计划重启电脑；同一个会话里只主动
+        # 引导一次，之后按热键只记日志，避免用户被反复打断。
+        if self._driver_prompt_done:
+            return False
+        self._driver_prompt_done = True
         try:
-            show_message_box(msg, "驱动未就绪 - RocoKingdom Clicker", error=True)
-        except Exception:
-            pass
+            _report_driver_not_ready(self.clicker, interactive=True)
+        except Exception as exc:
+            self.logger.error("驱动提示流程异常: %s", exc)
         return False
 
     # ---- 录制引擎初始化 ----
@@ -413,6 +458,13 @@ class ClickerManager:
             elif vk_code == self._hotkey_vk["cancel_recording"]:
                 if self._recording_session_active:
                     self.cancel_recording()
+            elif vk_code == self._hotkey_vk.get("record_region"):
+                if self._recording_session_active or self.script_running:
+                    self._toast("录制/脚本进行中，请先停止", duration=2.0)
+                elif self._playback and self._playback.is_playing():
+                    self._toast("回放进行中，请先停止", duration=2.0)
+                else:
+                    self.request_region_capture("drag")
         except Exception as e:
             self.logger.error("热键处理异常: %s\n%s", e, traceback.format_exc())
 
@@ -488,6 +540,194 @@ class ClickerManager:
         self._stop_active_script_session(wait_timeout=2.0)
         self._toast("⏹ 脚本已停止", duration=2.0)
         return True
+
+    # ---- 窗口区域连点 API（供 GUI 第四栏调用）----
+
+    @staticmethod
+    def _region_text(config: dict) -> str:
+        """区域的可读表示：800x600 @ (100,200)。"""
+        try:
+            return "{}x{} @ ({},{})".format(
+                int(config.get("region_width", 0)), int(config.get("region_height", 0)),
+                int(config.get("region_x", 0)), int(config.get("region_y", 0)),
+            )
+        except (TypeError, ValueError):
+            return "未设置"
+
+    def _build_region_action(self, config: dict) -> RegionClickAction | None:
+        """把参数字典转为 RegionClickAction（只保留数据类认识的字段）。"""
+        valid = {f.name for f in dataclass_fields(RegionClickAction)}
+        kwargs = {k: v for k, v in config.items() if k in valid}
+        try:
+            return RegionClickAction(**kwargs)
+        except Exception as e:
+            self.logger.error("构造区域连点动作失败: %s", e)
+            return None
+
+    def get_region_click_config(self) -> dict:
+        """返回当前保存的区域连点参数（含区域预设列表）。"""
+        config = ConfigManager.load_region_click()
+        config["region_presets"] = ConfigManager.list_region_presets()
+        return config
+
+    def save_region_click_config(self, config: dict) -> bool:
+        """保存区域连点参数。
+
+        先与已落盘的配置合并，避免面板未编辑的高级字段（如 path_params）
+        在“保存参数”时被静默丢弃。
+        """
+        merged = ConfigManager.load_region_click()
+        merged.update(config or {})
+        return ConfigManager.save_region_click(merged)
+
+    def list_region_presets(self) -> list:
+        """列出所有区域预设名称。"""
+        return ConfigManager.list_region_presets()
+
+    def get_region_preset(self, name: str) -> dict | None:
+        """按名称取区域预设。"""
+        return ConfigManager.get_region_preset(name)
+
+    def save_region_preset(self, name: str, region: dict, note: str = "") -> bool:
+        """保存一个区域预设。"""
+        ok = ConfigManager.save_region_preset(name, region or {}, note)
+        if ok:
+            self._toast(f"✓ 区域预设已保存：{name}", duration=2.5)
+        else:
+            self._toast("❌ 区域预设保存失败（名称为空或尺寸非法）", duration=3.0)
+        return ok
+
+    def delete_region_preset(self, name: str) -> bool:
+        """删除一个区域预设。"""
+        ok = ConfigManager.delete_region_preset(name)
+        self._toast(f"✓ 已删除区域预设：{name}" if ok else "❌ 区域预设不存在", duration=2.5)
+        return ok
+
+    def request_region_capture(self, mode: str = "drag") -> None:
+        """投递一个区域录制请求（由 GUI 主线程排空后创建圈选窗口）。
+
+        mode: "drag" = 全屏拖拽圈选；"window" = 拾取光标下的窗口。
+        """
+        if mode not in ("drag", "window"):
+            mode = "drag"
+        self._region_request_queue.put(mode)
+        if mode == "drag":
+            self._toast("📐 请拖拽圈选目标区域", duration=2.5)
+        else:
+            self._toast("🪟 3 秒后拾取鼠标所在窗口", duration=3.0)
+        self.logger.info("已投递区域录制请求: %s", mode)
+
+    def pop_region_request(self) -> str | None:
+        """取出一个区域录制请求（无请求返回 None）。"""
+        try:
+            return self._region_request_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def start_region_click(self, params: dict | None = None) -> bool:
+        """启动窗口区域连点。
+
+        复用脚本会话（_run_script_session），因此自动获得 F2 暂停/继续、停止按钮
+        与状态显示能力。移动全程使用相对位移注入，不受全局 move_mouse 开关影响。
+        """
+        config = ConfigManager.load_region_click()
+        if params:
+            for key in list(config.keys()):
+                if key in params and params[key] is not None:
+                    config[key] = params[key]
+
+        # 预设名优先：只给了预设名、没给尺寸时，用预设回填区域
+        preset_name = str(config.get("region_preset") or "").strip()
+        if preset_name and int(config.get("region_width", 0) or 0) <= 0:
+            preset = ConfigManager.get_region_preset(preset_name)
+            if preset:
+                for src, dst in (("x", "region_x"), ("y", "region_y"),
+                                 ("width", "region_width"), ("height", "region_height")):
+                    if src in preset:
+                        config[dst] = preset[src]
+            else:
+                self._toast(f"❌ 区域预设不存在：{preset_name}", duration=3.0)
+                return False
+
+        try:
+            width = int(config.get("region_width", 0))
+            height = int(config.get("region_height", 0))
+        except (TypeError, ValueError):
+            width = height = 0
+        if width <= 0 or height <= 0:
+            self._toast("❌ 请先圈选或填写目标区域", duration=3.0)
+            return False
+
+        if not self.clicker.is_ready():
+            self._show_driver_warning()
+            return False
+        if self.script_running:
+            self._toast("⚠ 已有脚本在运行，请先停止", duration=2.5)
+            return False
+        if self._playback and self._playback.is_playing():
+            self._toast("⚠ 正在回放，请先停止", duration=2.5)
+            return False
+        if self._recording_session_active:
+            self._toast("⚠ 正在录制，请先停止", duration=2.5)
+            return False
+        if not getattr(self.clicker.config, "move_mouse", True):
+            self._toast("ℹ 区域连点以移动为核心，不受「启动时移动鼠标」开关影响", duration=3.5)
+
+        action = self._build_region_action(config)
+        if action is None:
+            self._toast("❌ 区域连点参数非法", duration=3.0)
+            return False
+
+        name = f"窗口连点 {self._region_text(config)}"
+        # _run_script_session 含 3 秒倒计时与 worker.join()，会阻塞，所以放到后台线程
+        threading.Thread(
+            target=self._run_script_session, args=(name, [action]), daemon=True
+        ).start()
+        return True
+
+    def stop_region_click(self) -> bool:
+        """停止窗口区域连点。"""
+        if not self.script_running:
+            return False
+        self.logger.info("停止窗口区域连点: %s", self.current_script_name)
+        self._stop_active_script_session(wait_timeout=2.0)
+        self._toast("⏹ 窗口连点已停止", duration=2.0)
+        return True
+
+    def get_region_status(self) -> dict:
+        """返回区域连点的运行状态与统计（供 GUI 展示）。"""
+        executor = self.action_executor
+        return {
+            "active": bool(getattr(executor, "region_click_active", False)),
+            "total_clicks": int(getattr(executor, "region_click_total", 0)),
+            "spots_visited": int(getattr(executor, "region_click_spots", 0)),
+        }
+
+    def save_region_click_as_script(self, script_name: str,
+                                    params: dict | None = None) -> bool:
+        """把当前区域连点参数保存为可直接执行的动作脚本。"""
+        script_name = (script_name or "").strip()
+        if not script_name:
+            self._toast("❌ 脚本名不能为空", duration=2.5)
+            return False
+
+        config = ConfigManager.load_region_click()
+        if params:
+            for key in list(config.keys()):
+                if key in params and params[key] is not None:
+                    config[key] = params[key]
+        action = self._build_region_action(config)
+        if action is None:
+            self._toast("❌ 区域连点参数非法，无法保存脚本", duration=3.0)
+            return False
+        if action.region_width <= 0 or action.region_height <= 0:
+            self._toast("❌ 区域尺寸非法，无法保存脚本", duration=3.0)
+            return False
+
+        ok = self.action_manager.save_script(script_name, [action])
+        self._toast(f"✓ 已保存脚本：{script_name}" if ok else f"❌ 保存脚本失败：{script_name}",
+                    duration=3.0)
+        return ok
 
     # ---- 回放暂停/继续 API（供 GUI 按钮调用） ----
 
@@ -983,6 +1223,12 @@ class ClickerManager:
         pause_event = threading.Event()
         pause_event.set()
 
+        # 注入路径扰动参数（region_click 动作使用，与回放共用 path_planner.json）
+        try:
+            self.action_executor.path_planner_params = ConfigManager.load_path_planner()
+        except Exception as e:
+            self.logger.warning("注入路径扰动参数失败: %s", e)
+
         worker = threading.Thread(
             target=self.action_executor.execute_sequence,
             args=(actions, stop_event, pause_event),
@@ -1051,6 +1297,7 @@ class ClickerManager:
         print(f"  {self._hotkeys['start_recording']:4s}  - 开始录制输入")
         print(f"  {self._hotkeys['stop_recording']:4s}  - 停止录制并保存")
         print(f"  {self._hotkeys['cancel_recording']:4s}  - 取消录制（不保存）")
+        print(f"  {self._hotkeys.get('record_region', 'F6'):4s}  - 录制窗口区域（圈选矩形）")
         print("\n【默认参数】")
         print(f"  点击中心位置: ({self.clicker.config.center_x}, {self.clicker.config.center_y})")
         print(f"  随机移动半径: {self.clicker.config.radius}px")
@@ -1291,16 +1538,9 @@ def main():
         setup_logger()
         probe = InterceptionCore()
         if not probe.is_ready():
-            msg = (
-                "RocoKingdom Clicker 需要 Interception 驱动才能工作。\n\n"
-                f"{probe.init_error or '无法加载 interception.dll。'}\n\n"
-                "安装步骤：\n"
-                "  1) 以【管理员身份】运行本程序目录中的 driver_installer\\install-interception.exe /install\n"
-                "  2) 重启电脑后再运行本程序。\n\n"
-                "（如果你已安装驱动，可能只是还没重启；或安装程序所在路径不正确。）"
-            )
-            show_message_box(msg, "驱动未就绪 - RocoKingdom Clicker", error=True)
             logging.error("Interception 初始化失败：%s", probe.init_error)
+            # 驱动没装时直接弹「是否现在自动安装」，不再要求用户自己开管理员终端敲命令
+            _report_driver_not_ready(probe, interactive=True)
             sys.exit(1)
         del probe
 
@@ -1323,7 +1563,9 @@ def main():
     except Exception as e:
         logging.error("致命错误: %s", e)
         show_message_box(
-            f"程序启动时发生错误：\n{e}\n\n请先以管理员身份运行 driver_installer\\install-interception.exe /install\n安装驱动并重启电脑。",
+            f"程序启动时发生错误：\n{e}\n\n"
+            "若提示与驱动相关，请双击程序目录里的 install_driver.bat 一键安装，\n"
+            "安装完成后重启电脑再试。",
             "启动失败 - RocoKingdom Clicker",
             error=True,
         )

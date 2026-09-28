@@ -47,7 +47,10 @@ if errorlevel 1 (
 
 rem 3) Run PyInstaller
 echo Running PyInstaller (windowed)...
-%PY% -m PyInstaller --noconfirm --clean --distpath "%~dp0dist" --workpath "%~dp0build_pyinstaller" --specpath "%~dp0build_pyinstaller" --name "RocoKingdom_Clicker" --onedir --windowed --hidden-import gui --hidden-import webview --add-data "%~dp0docs;docs" Clicker.py
+rem --uac-admin 会把 requireAdministrator 清单内嵌进 exe，双击即弹 UAC 提权。
+rem 这是 run_clicker.vbs 的替代品：Windows 11 25H2 起 VBScript 默认被禁用，
+rem 不能再依赖 .vbs 去申请管理员权限。
+%PY% -m PyInstaller --noconfirm --clean --distpath "%~dp0dist" --workpath "%~dp0build_pyinstaller" --specpath "%~dp0build_pyinstaller" --name "RocoKingdom_Clicker" --onedir --windowed --uac-admin --hidden-import gui --hidden-import webview --hidden-import DriverInstaller --add-data "%~dp0docs;docs" Clicker.py
 if errorlevel 1 (
     echo PyInstaller build failed.
     exit /b 1
@@ -63,6 +66,6 @@ if errorlevel 1 (
 )
 
 echo Build complete. Release artifact: release\RocoKingdom_Clicker.zip
-echo To run the release, extract and run the exe in the folder, or use run_clicker.bat.
+echo To run the release, extract and double-click RocoKingdom_Clicker.exe (UAC prompt is built in).
 endlocal
 exit /b 0
