@@ -498,12 +498,8 @@ class ClickerManager:
                 if self._recording_session_active:
                     self.cancel_recording()
             elif vk_code == self._hotkey_vk.get("record_region"):
-                if self._recording_session_active or self.script_running:
-                    self._toast("录制/脚本进行中，请先停止", duration=2.0)
-                elif self._playback and self._playback.is_playing():
-                    self._toast("回放进行中，请先停止", duration=2.0)
-                else:
-                    self.request_region_capture("drag")
+                # 互斥检查在 request_region_capture 内部，与面板按钮共用同一条路径
+                self.request_region_capture("drag")
         except Exception as e:
             self.logger.error("热键处理异常: %s\n%s", e, traceback.format_exc())
 
@@ -652,19 +648,43 @@ class ClickerManager:
         self._toast(f"✓ 已删除区域预设：{name}" if ok else "❌ 区域预设不存在", duration=2.5)
         return ok
 
-    def request_region_capture(self, mode: str = "drag") -> None:
+    def _region_capture_blocker(self) -> str | None:
+        """返回阻止区域圈选的原因；允许时返回 None。"""
+        if self._recording_session_active:
+            return "⚠ 正在录制，请先停止"
+        if self.script_running:
+            return "⚠ 已有脚本在运行，请先停止"
+        if self._playback and self._playback.is_playing():
+            return "⚠ 回放进行中，请先停止"
+        if self.is_music_playing() or self.is_music_counting_down():
+            return "⚠ 正在演奏 MIDI，请先停止"
+        return None
+
+    def request_region_capture(self, mode: str = "drag") -> bool:
         """投递一个区域录制请求（由 GUI 主线程排空后创建圈选窗口）。
 
         mode: "drag" = 全屏拖拽圈选；"window" = 拾取光标下的窗口。
+        返回是否成功投递（被互斥检查拦下时为 False）。
+
+        互斥检查放在这里而不是各个调用点：圈选会弹出覆盖全屏的 Tk 窗口，
+        F6 热键和面板上三个按钮（拖拽圈选 / 拾取窗口 / 录制区域）必须走同一条
+        路径。曾经只有热键这一侧做检查，从按钮进来就能在脚本运行中把覆盖层
+        盖到游戏上。
         """
         if mode not in ("drag", "window"):
             mode = "drag"
+        blocker = self._region_capture_blocker()
+        if blocker:
+            self._toast(blocker, duration=2.5)
+            self.logger.info("区域圈选被拒绝: %s", blocker)
+            return False
         self._region_request_queue.put(mode)
         if mode == "drag":
             self._toast("📐 请拖拽圈选目标区域", duration=2.5)
         else:
             self._toast("🪟 3 秒后拾取鼠标所在窗口", duration=3.0)
         self.logger.info("已投递区域录制请求: %s", mode)
+        return True
 
     def pop_region_request(self) -> str | None:
         """取出一个区域录制请求（无请求返回 None）。"""

@@ -1881,11 +1881,11 @@ class _DesktopWindow:
         cap_row.pack(fill="x", pady=(0, 6))
         for text, mode in (("📐 拖拽圈选", "drag"), ("🪟 拾取窗口", "window")):
             btn = ttk.Button(cap_row, text=text,
-                             command=lambda m=mode: self._start_region_capture(m))
+                             command=lambda m=mode: self._on_region_capture_request(m))
             btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
             self._rc_capture_widgets.append(btn)
         hotkey_btn = ttk.Button(cap_row, text="🎙 录制区域",
-                                command=self._on_record_region_request)
+                                command=lambda: self._on_region_capture_request("drag"))
         hotkey_btn.pack(side="left", expand=True, fill="x")
         self._rc_capture_widgets.append(hotkey_btn)
         self._rc_record_btn = hotkey_btn
@@ -2224,15 +2224,22 @@ class _DesktopWindow:
             self._rc_preset_var.set(self._RC_NO_PRESET)
             self._refresh_region_presets()
 
-    def _on_record_region_request(self):
-        """「🎙 录制区域」按钮：走与热键完全相同的请求队列路径。"""
+    def _on_region_capture_request(self, mode: str = "drag"):
+        """三个捕获按钮的统一入口，与 F6 热键走完全相同的请求队列路径。
+
+        必须经过后端队列而不能直接调 _start_region_capture：互斥检查在后端，
+        直接调用会绕过它，脚本/回放/演奏进行中也能把全屏覆盖层弹出来。
+        """
         try:
-            self.js_api.request_region_capture("drag")
+            self.js_api.request_region_capture(mode)
         except Exception as exc:
             messagebox.showerror("录制失败", str(exc))
 
     def _start_region_capture(self, mode: str = "drag"):
-        """在主线程启动区域录制（Tk 窗口不可在子线程创建）。"""
+        """在主线程真正创建圈选窗口（Tk 窗口不可在子线程创建）。
+
+        只应由 _drain_region_requests 调用，即所有入口都已过后端互斥检查。
+        """
         try:
             if self._rc_selector.busy:
                 return

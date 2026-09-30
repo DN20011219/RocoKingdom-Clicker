@@ -98,7 +98,7 @@ python -m unittest discover -s tests -v
 
 - **区域录制**：`📐 拖拽圈选` 会铺满整个虚拟屏（支持多显示器负坐标），拖框即得矩形；`🪟 拾取窗口` 倒计时 3 秒后自动取光标下窗口的可视边界（DWM 扩展边界，不包含阴影）。`Esc` / 右键取消。
 - **区域预设**：圈选结果可命名保存为预设（`data/clicker_configs/region_presets.json`），下次直接下拉选用；手写脚本也可用 `"region_preset": "预设名"` 引用。
-- **热键录制**：按 `F6`（可自定义）在任何时候直接进入圈选；录制中 / 脚本运行中按下会被拒绝并提示。
+- **三个入口，一套互斥规则**：`📐 拖拽圈选`、`🪟 拾取窗口`、`🎙 录制区域`（= `F6` 热键的等价按钮）以及 `F6` 本身，全部经过 `ClickerManager.request_region_capture()` 同一条路径。**录制中 / 脚本运行中 / 回放中 / MIDI 演奏中一律拒绝并提示**，不会把全屏覆盖层盖到游戏上。`🎙 录制区域` 与 `📐 拖拽圈选` 的动作完全相同，区别只是它经过请求队列（最多约 0.5 秒延迟），保留它是为了在面板上给 `F6` 一个可见的对应按钮。
 - **路径算法**：点与点之间的移动复用第三栏的 `PathPlanner`（`sine` / `fitts` / `neuromotor` / `straight`），也可在第四栏单独指定策略（`global` = 跟随第三栏）。
 - **相对注入**：全程只发相对位移，不使用绝对坐标，因此多显示器与光标锁定场景都能正常工作，也**不受**全局 `move_mouse` 开关影响（启动时会 toast 说明）。
 - **可中断**：运行中 `F2` 暂停 / 继续、第四栏或中栏的停止按钮均全程生效。
@@ -280,8 +280,8 @@ python -m unittest discover -s tests -v
 - 修改热键后按钮 label 会自动更新（如 `⏸ 暂停 (F3)`）；若未更新，点击"保存热键设置"按钮触发刷新。
 
 ## 更新日志与贡献
-- 最新变更记录请见：[docs/changelog/2026-09-28.md](docs/changelog/2026-09-28.md)
-- 历史变更：[docs/changelog/2026-09-27.md](docs/changelog/2026-09-27.md) | [docs/changelog/2026-07-20.md](docs/changelog/2026-07-20.md) | [docs/changelog/2026-06-29.md](docs/changelog/2026-06-29.md) | [docs/changelog/2026-06-21.md](docs/changelog/2026-06-21.md)
+- 最新变更记录请见：[docs/changelog/2026-09-30.md](docs/changelog/2026-09-30.md)
+- 历史变更：[docs/changelog/2026-09-28.md](docs/changelog/2026-09-28.md) | [docs/changelog/2026-09-27.md](docs/changelog/2026-09-27.md) | [docs/changelog/2026-07-20.md](docs/changelog/2026-07-20.md) | [docs/changelog/2026-06-29.md](docs/changelog/2026-06-29.md) | [docs/changelog/2026-06-21.md](docs/changelog/2026-06-21.md)
 - 欢迎提交 issue 或 PR，描述你的使用场景与复现步骤。
 
 ---

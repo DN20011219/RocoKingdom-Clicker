@@ -1,8 +1,12 @@
 """GUI 构建冒烟测试。
 
-webview.py 里几百行 Tkinter 代码只有在真正构建窗口时才会执行，单元测试碰不到。
-这里用一个假的 js_api 把 _DesktopWindow 完整搭起来（不启动 mainloop），
-验证第五栏「MIDI 自动演奏」面板能正常渲染、分析结果能正确驱动按钮状态。
+webview.py 里几千行 Tkinter 代码只有在真正构建窗口时才会执行，单元测试碰不到。
+这里用一个假的 js_api 把 _DesktopWindow 完整搭起来（不启动 mainloop），验证：
+
+- MusicPanelSmokeTest：第五栏「MIDI 自动演奏」能正常渲染，分析结果能正确驱动
+  按钮状态与明细文本，键位编辑对话框往返正常。
+- RegionCaptureRoutingTest：第四栏三个区域捕获按钮都走后端队列，因而都吃得到
+  ClickerManager 里的互斥检查。
 
 跑测试时屏幕上会闪一下窗口，构造完立即 withdraw + destroy。
 """
@@ -112,6 +116,7 @@ class StubApi:
         }
         self.saved_configs: list[dict] = []
         self.started: list[tuple] = []
+        self.region_requests: list[str] = []
 
     # ---- 既有面板 ----
     def get_anchor_mode(self):
@@ -131,6 +136,10 @@ class StubApi:
 
     def list_region_presets(self):
         return []
+
+    def request_region_capture(self, mode="drag"):
+        self.region_requests.append(mode)
+        return True
 
     def pop_region_request(self):
         return None
@@ -500,6 +509,86 @@ class MusicPanelSmokeTest(unittest.TestCase):
             self.assertIn("同时绑给", self.msgbox.last_message())
         finally:
             dialog.win.destroy()
+
+
+@unittest.skipUnless(TK_AVAILABLE, "当前环境没有可用的显示设备")
+class RegionCaptureRoutingTest(unittest.TestCase):
+    """三个区域捕获按钮必须都走后端队列。
+
+    互斥检查（录制/脚本/回放/演奏进行中拒绝圈选）在 ClickerManager 里，只有
+    经过 js_api.request_region_capture 才吃得到。曾经「拖拽圈选」和「拾取窗口」
+    直接调 _start_region_capture 绕过了检查，脚本运行中也能把全屏覆盖层弹出来。
+    这个测试锁住回归。
+    """
+
+    _EXPECTED = (("拖拽圈选", "drag"), ("拾取窗口", "window"), ("录制区域", "drag"))
+
+    def setUp(self):
+        self.api = StubApi()
+        self._real_messagebox = webview.messagebox
+        self.msgbox = StubMessageBox()
+        webview.messagebox = self.msgbox
+        self.addCleanup(self._restore_messagebox)
+
+        self.app = webview._DesktopWindow("测试窗口", self.api, 2540, 1300)
+        try:
+            self.app.root.withdraw()
+        except Exception:
+            pass
+        self.addCleanup(self._destroy)
+
+    def _restore_messagebox(self):
+        webview.messagebox = self._real_messagebox
+
+    def _destroy(self):
+        try:
+            self.app.root.destroy()
+        except Exception:
+            pass
+
+    def _capture_buttons(self):
+        """按标签文字找出三个捕获按钮。
+
+        用包含匹配而不是全等：「🎙 录制区域」的标签会被热键刷新逻辑改写成
+        「🎙 录制区域 (F6)」，写死全等会在改热键显示时莫名其妙地失败。
+        """
+        found = {}
+        for widget in self.app._rc_capture_widgets:
+            try:
+                text = str(widget.cget("text"))
+            except Exception:
+                continue
+            for label, mode in self._EXPECTED:
+                if label in text:
+                    found[label] = (widget, mode)
+        return found
+
+    def test_all_three_capture_buttons_exist(self):
+        found = self._capture_buttons()
+        self.assertEqual(sorted(found), sorted(label for label, _ in self._EXPECTED))
+
+    def test_buttons_go_through_backend_not_selector(self):
+        direct_calls: list = []
+        self.app._start_region_capture = lambda mode="drag": direct_calls.append(mode)
+
+        for label, (widget, mode) in self._capture_buttons().items():
+            self.api.region_requests.clear()
+            widget.invoke()
+            self.assertEqual(self.api.region_requests, [mode],
+                             f"{label} 没有以 mode={mode!r} 投递到后端")
+
+        self.assertEqual(direct_calls, [],
+                         "按钮直接调了 _start_region_capture，会绕过后端互斥检查")
+
+    def test_drain_still_creates_the_selector(self):
+        """队列排空这条路径必须照旧真正创建圈选窗口，否则统一入口就成了空转。"""
+        created: list = []
+        self.app._start_region_capture = lambda mode="drag": created.append(mode)
+        pending = ["window", None]
+        self.api.pop_region_request = lambda: pending.pop(0) if pending else None
+
+        self.app._drain_region_requests()
+        self.assertEqual(created, ["window"])
 
 
 if __name__ == "__main__":

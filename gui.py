@@ -358,10 +358,10 @@ class Api:
         """请求进入区域录制（“drag”=拖拽圈选，“window”=拾取窗口）。
 
         只投递请求，实际的圈选窗口由 GUI 主线程轮询后创建。
+        互斥检查在后端：录制/脚本/回放/演奏进行中会被拒绝并返回 False。
         """
         try:
-            self.manager.request_region_capture(mode)
-            return True
+            return bool(self.manager.request_region_capture(mode))
         except Exception:
             return False
 
