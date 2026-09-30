@@ -2035,7 +2035,22 @@ def main():
     try:
         parser = argparse.ArgumentParser(description="RocoKingdom Clicker")
         parser.add_argument('--gui', action='store_true', help='启动图形界面')
+        parser.add_argument('--install-driver', action='store_true',
+                            help='只安装 Interception 驱动后退出（供 install_driver.bat 调用）')
+        parser.add_argument('--uninstall-driver', action='store_true',
+                            help='只卸载 Interception 驱动后退出')
         args = parser.parse_args()
+
+        # 纯驱动维护模式：不初始化 Interception、不开 GUI，全部交给 DriverInstaller。
+        # install_driver.bat 会调到这里 —— 那个 .bat 必须是纯 ASCII（cmd 解析含多字节
+        # 字符的行会错位，把行尾当命令执行），所以面向用户的中文提示一律由
+        # DriverInstaller 的原生消息框给出，而不是靠 .bat 的 echo。
+        if args.install_driver or args.uninstall_driver:
+            setup_logger()
+            sys.exit(DriverInstaller.main(
+                ["--uninstall"] if args.uninstall_driver else ["--install"]
+            ))
+
         # 如果是打包后的可执行文件（frozen），默认打开 GUI 窗口以匹配发布版行为
         if getattr(sys, 'frozen', False) and not args.gui:
             args.gui = True

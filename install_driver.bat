@@ -1,130 +1,106 @@
 @echo off
 setlocal EnableExtensions
-chcp 65001 >nul
 cd /d "%~dp0"
-title Interception 驱动一键安装 - RocoKingdom Clicker
+title Interception Driver Installer - RocoKingdom Clicker
 
-set "ACTION=/install"
-if /i "%~1"=="/uninstall" set "ACTION=/uninstall"
-if /i "%~1"=="uninstall" set "ACTION=/uninstall"
+rem ---------------------------------------------------------------------------
+rem  ASCII-ONLY FILE -- DO NOT ADD CHINESE TEXT HERE.
+rem
+rem  cmd.exe advances through a batch file by character count, not byte count,
+rem  so a line containing multi-byte characters leaves the reader mid-line and
+rem  the remaining tail is executed as a command. Every user-facing Chinese
+rem  message is therefore produced by DriverInstaller.py as a native message
+rem  box; this script is only a launcher.
+rem ---------------------------------------------------------------------------
 
-rem ============================================================
-rem  自提权
-rem  Windows 11 25H2 起 VBScript 被列为「按需功能」并默认关闭，双击 .vbs 不再
-rem  可靠，所以这里不用 .vbs，而是用 PowerShell 的 Start-Process -Verb RunAs
-rem  把自己重新拉起一次；第二个参数 elevated 是标记，防止无限自我提权。
-rem ============================================================
-net session >nul 2>&1
-if not errorlevel 1 goto :elevated
-if /i "%~2"=="elevated" goto :elevate_failed
+set "MODE=install"
+if /i "%~1"=="/uninstall"   set "MODE=uninstall"
+if /i "%~1"=="uninstall"    set "MODE=uninstall"
+if /i "%~1"=="--uninstall"  set "MODE=uninstall"
 
+rem ---- Preferred path: the packaged exe ----
+rem It already embeds a requireAdministrator manifest (PyInstaller --uac-admin)
+rem so it elevates by itself, and DriverInstaller.py shows the Chinese dialogs
+rem including the "reboot now?" question. No elevation logic needed here.
+set "EXE=%~dp0RocoKingdom_Clicker.exe"
+if exist "%EXE%" goto :via_exe
+
+rem ---- Source checkout: drive DriverInstaller.py with Python ----
+if not exist "%~dp0DriverInstaller.py" goto :via_raw_installer
+where python >nul 2>&1
+if errorlevel 1 goto :via_raw_installer
+
+echo Running: python DriverInstaller.py --%MODE%
+echo Follow the dialogs; a reboot is required afterwards.
 echo.
-echo 正在请求管理员权限，请在弹出的 UAC 窗口中点「是」...
-powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -ArgumentList '%ACTION%','elevated' -Verb RunAs -ErrorAction Stop } catch { exit 1 }"
+python "%~dp0DriverInstaller.py" --%MODE%
+set "RC=%ERRORLEVEL%"
+goto :report
+
+:via_exe
+echo Running: RocoKingdom_Clicker.exe --%MODE%-driver
+echo Click Yes in the UAC prompt, then follow the dialogs.
+echo.
+start "" /wait "%EXE%" --%MODE%-driver
+set "RC=%ERRORLEVEL%"
+goto :report
+
+rem ---- Last resort: no exe and no Python ----
+rem Drive the official installer directly. There is no manifest-bearing host
+rem left to elevate for us, so re-launch this script through PowerShell.
+:via_raw_installer
+set "INSTALLER=%~dp0driver_installer\install-interception.exe"
+if exist "%INSTALLER%" goto :raw_elevate
+set "INSTALLER=%~dp0third\Interception\command line installer\install-interception.exe"
+if exist "%INSTALLER%" goto :raw_elevate
+
+echo [ERROR] install-interception.exe not found. Looked in:
+echo           %~dp0driver_installer\
+echo           %~dp0third\Interception\command line installer\
+echo         Make sure the release package was FULLY extracted; do not run it
+echo         from inside the zip archive.
+echo.
+pause
+exit /b 1
+
+:raw_elevate
+net session >nul 2>&1
+if not errorlevel 1 goto :raw_run
+if /i "%~2"=="elevated" goto :raw_elevate_failed
+
+echo Requesting administrator rights, click Yes in the UAC prompt ...
+powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -ArgumentList '/%MODE%','elevated' -Verb RunAs -ErrorAction Stop } catch { exit 1 }"
 if errorlevel 1 goto :uac_cancelled
 exit /b
 
+:raw_elevate_failed
+echo [ERROR] still not running as administrator after elevation.
+echo         Right-click this file and choose "Run as administrator".
+echo.
+pause
+exit /b 1
+
 :uac_cancelled
-echo.
-echo 【已取消】没有获得管理员权限，驱动未做任何改动。
-echo.
-pause
-exit /b 1
-
-:elevate_failed
-echo.
-echo 【错误】提权后仍然不是管理员身份。
-echo   请手动右键本文件，选择「以管理员身份运行」。
+echo [CANCELLED] administrator rights were not granted; nothing was changed.
 echo.
 pause
 exit /b 1
 
-:elevated
-echo.
-echo ========================================
-echo   Interception 驱动安装工具
-echo   操作：%ACTION%
-echo ========================================
-echo.
-
-rem ---- 定位官方安装器（发布包 / 源码仓库两种布局） ----
-set "INSTALLER=%~dp0driver_installer\install-interception.exe"
-if exist "%INSTALLER%" goto :found_installer
-set "INSTALLER=%~dp0third\Interception\command line installer\install-interception.exe"
-if exist "%INSTALLER%" goto :found_installer
-set "INSTALLER=%~dp0install-interception.exe"
-if exist "%INSTALLER%" goto :found_installer
-
-echo 【错误】找不到驱动安装程序 install-interception.exe
-echo   已查找以下位置：
-echo     %~dp0driver_installer\install-interception.exe
-echo     %~dp0third\Interception\command line installer\install-interception.exe
-echo     %~dp0install-interception.exe
-echo   请确认发布包已【完整解压】，不要直接在压缩包里双击运行。
-echo.
-pause
-exit /b 1
-
-:found_installer
-echo 安装程序：%INSTALLER%
-echo.
-
-rem ---- 先报一下当前状态，方便判断「装了但没重启」 ----
-rem Interception 是键盘/鼠标「类过滤驱动」，服务名就叫 keyboard / mouse，
-rem 并没有名为 interception 的服务，所以 sc query interception 永远查不到。
-set "DRIVER_STATE=未安装"
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}" /v UpperFilters 2>nul | find "mouse\0" >nul
-if not errorlevel 1 set "DRIVER_STATE=已安装（若程序仍报驱动未就绪，通常只是还没重启电脑）"
-echo 当前驱动状态：%DRIVER_STATE%
-echo.
-
-set "LOG=%TEMP%\roco_driver_install.log"
-if exist "%LOG%" del /f /q "%LOG%" >nul 2>&1
-
-echo 正在执行：%INSTALLER% %ACTION%
+:raw_run
+echo Running: "%INSTALLER%" /%MODE%
 echo ------------------------------------------------------------
-"%INSTALLER%" %ACTION% > "%LOG%" 2>&1
+"%INSTALLER%" /%MODE%
 set "RC=%ERRORLEVEL%"
-if exist "%LOG%" type "%LOG%"
 echo ------------------------------------------------------------
+
+:report
 echo.
-
-if %RC% equ 0 goto :done_ok
-rem 个别版本的安装器返回码不规范，用官方成功文案兜底判断
-findstr /i /c:"successfully" "%LOG%" >nul 2>&1
-if not errorlevel 1 goto :done_ok
-
-echo 【失败】安装程序返回码：%RC%
-echo   常见原因：
-echo     1) 没有真正的管理员权限（被 UAC 拦下）
-echo     2) 安全软件阻止了驱动写入
-echo     3) 发布包不完整，安装器本体损坏
-echo   完整输出见：%LOG%
+if "%RC%"=="0" (
+    echo Finished successfully.
+) else (
+    echo Finished with exit code %RC%.
+)
+echo A reboot is required for the driver change to take effect.
 echo.
 pause
-exit /b 1
-
-:done_ok
-if /i "%ACTION%"=="/uninstall" goto :done_uninstall
-
-echo 【成功】驱动已安装，必须重启电脑才能生效。
-echo.
-choice /c YN /m "是否立即重启电脑？"
-if errorlevel 2 goto :skip_reboot
-echo.
-echo 系统将在 15 秒后重启；如需取消请立刻在命令行执行：shutdown /a
-shutdown /r /t 15 /c "Interception 驱动已安装，系统即将重启以生效"
-exit /b 0
-
-:skip_reboot
-echo.
-echo 好的，请稍后手动重启电脑，重启后再双击 RocoKingdom_Clicker.exe 即可。
-echo.
-pause
-exit /b 0
-
-:done_uninstall
-echo 【成功】驱动已卸载，重启电脑后彻底移除。
-echo.
-pause
-exit /b 0
+exit /b %RC%

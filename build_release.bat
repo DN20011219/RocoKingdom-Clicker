@@ -47,9 +47,12 @@ if errorlevel 1 (
 
 rem 3) Run PyInstaller
 echo Running PyInstaller (windowed)...
-rem --uac-admin 会把 requireAdministrator 清单内嵌进 exe，双击即弹 UAC 提权。
-rem 这是 run_clicker.vbs 的替代品：Windows 11 25H2 起 VBScript 默认被禁用，
-rem 不能再依赖 .vbs 去申请管理员权限。
+rem --uac-admin embeds a requireAdministrator manifest into the exe, so double
+rem clicking it triggers the UAC prompt. This replaces the old run_clicker.vbs:
+rem VBScript is disabled by default since Windows 11 25H2.
+rem NOTE: keep this file ASCII-only. cmd.exe seeks batch files by character
+rem count instead of byte count, so a line containing multi-byte characters can
+rem be mis-parsed and its tail executed as a command.
 %PY% -m PyInstaller --noconfirm --clean --distpath "%~dp0dist" --workpath "%~dp0build_pyinstaller" --specpath "%~dp0build_pyinstaller" --name "RocoKingdom_Clicker" --onedir --windowed --uac-admin --hidden-import gui --hidden-import webview --hidden-import DriverInstaller --add-data "%~dp0docs;docs" Clicker.py
 if errorlevel 1 (
     echo PyInstaller build failed.

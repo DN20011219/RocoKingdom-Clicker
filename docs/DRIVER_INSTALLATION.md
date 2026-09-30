@@ -29,19 +29,32 @@ RocoKingdom Clicker 需要 Interception 驱动才能模拟鼠标点击。
 
 ## 方式二：`install_driver.bat`
 
-不想先启动主程序的话，双击包里的 `install_driver.bat`：
+不想先启动主程序的话，双击包里的 `install_driver.bat`。它只是一个**启动器**，真正的安装流程与全部中文提示都来自 `DriverInstaller.py`，因此看到的对话框与方式一完全一致。
 
-- 自动请求管理员权限（用 PowerShell `Start-Process -Verb RunAs` 把自己重新拉起，**不依赖 `.vbs`**）
-- 自动定位安装器：先找 `driver_installer\install-interception.exe`，再退回源码仓库的 `third\Interception\command line installer\install-interception.exe`
-- 先打印当前驱动状态（区分「未安装」和「已安装但没重启」）
-- 把安装器输出原样显示出来，失败时给出排查方向
-- 成功后用 `choice` 问是否立即重启
+它按以下优先级选择执行方式：
+
+| 你所在的环境 | 走哪条路 |
+| --- | --- |
+| 发布包（有 `RocoKingdom_Clicker.exe`） | `RocoKingdom_Clicker.exe --install-driver`；exe 自带提权清单，自己弹 UAC |
+| 源码仓库（有 `DriverInstaller.py` 与 Python） | `python DriverInstaller.py --install` |
+| 两者都没有 | 直接调官方 `install-interception.exe`，用 PowerShell `Start-Process -Verb RunAs` 提权 |
 
 卸载驱动：
 
 ```bat
 install_driver.bat /uninstall
 ```
+
+也可以跳过 `.bat`，直接用命令行：
+
+```bat
+RocoKingdom_Clicker.exe --install-driver
+RocoKingdom_Clicker.exe --uninstall-driver
+python DriverInstaller.py --install
+python DriverInstaller.py --status
+```
+
+> **这三个 `.bat` 都是纯 ASCII 文件，刻意不写中文。** cmd.exe 按「字符数」而不是「字节数」推进它在批处理文件里的读取位置，含多字节字符的行会让它停在行中间，把行尾当成新命令执行。实测 Windows 11 25H2：一行纯中文的 `rem` 注释会报 `'venv' is not recognized as an internal or external command`，尽管它只是注释。要新增面向用户的提示，请加到 `DriverInstaller.py` 的消息框里，不要加到 `.bat` 的 `echo`。
 
 ## 方式三：纯手动
 

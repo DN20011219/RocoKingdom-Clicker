@@ -26,7 +26,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `install_driver.bat` | 单独一键安装（或 `/uninstall` 卸载）驱动，自动提权 + 装完问是否重启 |
+| `install_driver.bat` | 单独一键安装（或 `/uninstall` 卸载）驱动；实际调 `RocoKingdom_Clicker.exe --install-driver`，提示与程序内完全一致 |
 | `run_clicker.bat` | 兼容用启动器；源码开发环境下用它提权跑 `Clicker.py` |
 
 ### 开发与调试（源码运行）
@@ -269,6 +269,7 @@ python -m unittest discover -s tests -v
 ```
 
 - 构建脚本要点：使用 `PyInstaller --onedir --windowed --uac-admin` 生成无控制台窗口、**双击即自动弹 UAC** 的发布目录（`--uac-admin` 就是 `run_clicker.vbs` 的替代品），并把 `run_clicker.bat` / `install_driver.bat` 复制进 `dist\\RocoKingdom_Clicker`（同时包含示例脚本与默认配置）。
+- **三个 `.bat`（`build_release.bat` / `run_clicker.bat` / `install_driver.bat`）必须保持纯 ASCII，不要往里加中文。** cmd.exe 按字符数而不是字节数推进批处理文件的读取位置，含多字节字符的行会被错位解析，行尾被当成命令执行（实测：一行中文 `rem` 注释报 `'venv' is not recognized as an internal or external command`）。面向用户的中文提示一律放在 `DriverInstaller.py` 的消息框里。
 
 ## 调试与常见问题
 - 如果在游戏中无法捕获热键，确认程序是**以管理员身份**运行的（发布包 exe 已内嵌提权清单，源码运行请走 `run_clicker.bat`）。

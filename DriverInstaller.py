@@ -535,6 +535,30 @@ def _print_status() -> None:
     print(f"  安装器路径          : {installer or '未找到'}")
 
 
+def _progress(text: str) -> None:
+    """过程信息：只在有控制台时打印。
+
+    发布包的 exe 是 PyInstaller `--windowed` 打的，`sys.stdout` 为 None；
+    这里不能弹消息框，否则会在安装开始前就阻塞等待用户点确定。
+    """
+    if sys.stdout is not None:
+        print(text)
+
+
+def _notify(text: str, *, error: bool = False, info: bool = False) -> None:
+    """结果信息：有控制台就打印，没控制台就弹消息框。
+
+    `install_driver.bat` 会走 exe 调进来，那条路径上没有控制台，
+    不弹框的话用户看不到任何反馈，会以为程序卡死了。
+    """
+    if sys.stdout is not None:
+        print(text)
+    else:
+        show_message_box(
+            text, "Interception 驱动安装", error=error, info=info
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Interception 驱动一键安装工具")
     group = parser.add_mutually_exclusive_group()
@@ -553,25 +577,49 @@ def main(argv: list[str] | None = None) -> int:
 
     installer = find_installer()
     if installer is None:
-        print(f"【错误】找不到 {INSTALLER_NAME}")
-        print(f"  已查找：{get_app_dir()}")
+        _notify(
+            f"找不到驱动安装程序 {INSTALLER_NAME}，程序文件可能不完整。\n\n"
+            "请重新下载并【完整解压】发布包，不要在压缩包里直接双击运行。",
+            error=True,
+        )
         return 1
 
     action = "/uninstall" if args.uninstall else "/install"
-    print(f"正在执行：{installer} {action}")
+    _progress(f"正在执行：{installer} {action}")
     status, output = run_installer(installer, action)
     if output:
-        print("-" * 40)
-        print(output)
-        print("-" * 40)
+        _progress("-" * 40)
+        _progress(output)
+        _progress("-" * 40)
 
     if status == INSTALL_OK:
-        print("成功。必须重启电脑才能生效。")
+        if args.uninstall:
+            _notify("驱动已卸载，重启电脑后彻底移除。", info=True)
+            return 0
+        # 装完必须重启才生效。这一步一定要有 UI：发布包走的是 --windowed exe，
+        # 没有控制台，只 print 的话用户完全看不到结果。
+        if ask_yes_no(
+            "驱动安装成功！\n\n"
+            "必须重启电脑才能生效。\n"
+            f"是否立即重启？（{_REBOOT_DELAY_SECONDS} 秒倒计时，期间可用 shutdown /a 取消）\n\n"
+            "选「否」请先保存好其它工作，稍后自行重启。",
+            "安装完成 - RocoKingdom Clicker",
+            default_yes=False,
+        ):
+            if not request_reboot():
+                _notify("自动重启调用失败，请手动重启电脑后再运行本程序。", error=True)
+        else:
+            _notify("驱动已安装完成。\n\n请手动重启电脑，然后再运行本程序。", info=True)
         return 0
+
     if status == INSTALL_CANCELLED:
-        print("已取消（UAC 未通过）。")
+        _notify("已在 UAC 提示中取消，驱动没有安装。", info=True)
         return 2
-    print(f"失败：{status}")
+
+    _notify(
+        f"驱动安装失败：\n\n{output}\n\n{_manual_steps(installer)}",
+        error=True,
+    )
     return 1
 
 
