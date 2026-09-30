@@ -200,9 +200,18 @@ class ClickAction:
     x_jitter_px: int = 0
     y_jitter_px: int = 0
     hold_jitter_ms: int = 0
+    # 市场脚本 v2：归一化坐标（0~1），runtime_normalize=True 时运行时按当前分辨率换算
+    x_norm: Optional[float] = None
+    y_norm: Optional[float] = None
+    runtime_normalize: bool = False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if d.get("x_norm") is None:
+            d.pop("x_norm", None)
+            d.pop("y_norm", None)
+            d.pop("runtime_normalize", None)
+        return d
 
 
 @dataclass
@@ -214,9 +223,18 @@ class MoveAction:
     x_jitter_px: int = 0
     y_jitter_px: int = 0
     duration_jitter_ms: int = 0
+    # 市场脚本 v2：归一化坐标（0~1），runtime_normalize=True 时运行时按当前分辨率换算
+    x_norm: Optional[float] = None
+    y_norm: Optional[float] = None
+    runtime_normalize: bool = False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if d.get("x_norm") is None:
+            d.pop("x_norm", None)
+            d.pop("y_norm", None)
+            d.pop("runtime_normalize", None)
+        return d
 
 
 @dataclass
@@ -533,6 +551,17 @@ class ActionExecutor:
             return max(minimum, int(value))
         return max(minimum, int(round(value + random.uniform(-jitter, jitter))))
 
+    def _resolve_base_xy(self, action) -> tuple[int, int]:
+        """解析动作基础坐标：市场脚本 v2 运行时归一化模式按当前分辨率动态换算。"""
+        if getattr(action, "runtime_normalize", False) and \
+                getattr(action, "x_norm", None) is not None and \
+                getattr(action, "y_norm", None) is not None:
+            width = max(user32.GetSystemMetrics(0) - 1, 1)
+            height = max(user32.GetSystemMetrics(1) - 1, 1)
+            return (int(round(action.x_norm * width)),
+                    int(round(action.y_norm * height)))
+        return int(action.x), int(action.y)
+
     def _screen_to_interception(self, x: int, y: int) -> tuple[int, int]:
         """把屏幕像素坐标转换为 Interception 绝对坐标。"""
         width = max(user32.GetSystemMetrics(0) - 1, 1)
@@ -553,8 +582,9 @@ class ActionExecutor:
 
         if move_allowed:
             # 移动
-            target_x = self._apply_jitter(action.x, action.x_jitter_px)
-            target_y = self._apply_jitter(action.y, action.y_jitter_px)
+            base_x, base_y = self._resolve_base_xy(action)
+            target_x = self._apply_jitter(base_x, action.x_jitter_px)
+            target_y = self._apply_jitter(base_y, action.y_jitter_px)
             abs_x, abs_y = self._screen_to_interception(target_x, target_y)
             stroke = InterceptionMouseStroke()
             stroke.state = 0
@@ -611,8 +641,9 @@ class ActionExecutor:
             self.logger.debug("移动指令已被忽略（move_mouse=False）")
             return
 
-        target_x = self._apply_jitter(action.x, action.x_jitter_px)
-        target_y = self._apply_jitter(action.y, action.y_jitter_px)
+        base_x, base_y = self._resolve_base_xy(action)
+        target_x = self._apply_jitter(base_x, action.x_jitter_px)
+        target_y = self._apply_jitter(base_y, action.y_jitter_px)
         abs_x, abs_y = self._screen_to_interception(target_x, target_y)
         stroke = InterceptionMouseStroke()
         stroke.state = 0
@@ -1132,7 +1163,9 @@ class ActionScriptManager:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            actions = [self._parse_action(item) for item in data.get("actions", [])]
+            # 市场脚本 v2：runtime_normalize=true 时坐标在运行时按当前分辨率动态换算
+            runtime_normalize = bool(data.get("runtime_normalize", False))
+            actions = [self._parse_action(item, runtime_normalize) for item in data.get("actions", [])]
             actions = [action for action in actions if action is not None]
             
             self.logger.info("已加载脚本: %s (%d 个动作)", script_name, len(actions))
@@ -1142,7 +1175,7 @@ class ActionScriptManager:
             self.logger.error("加载脚本失败: %s", e)
             return []
 
-    def _parse_action(self, item: dict) -> Any:
+    def _parse_action(self, item: dict, runtime_normalize: bool = False) -> Any:
         """把 JSON 动作转换为内部动作对象。"""
         action_type = item.get("type")
         if action_type == "click":
@@ -1153,6 +1186,9 @@ class ActionScriptManager:
                 item.get("x_jitter_px", 0),
                 item.get("y_jitter_px", 0),
                 item.get("hold_jitter_ms", 0),
+                x_norm=item.get("x_norm"),
+                y_norm=item.get("y_norm"),
+                runtime_normalize=runtime_normalize,
             )
         if action_type == "move":
             return MoveAction(
@@ -1162,6 +1198,9 @@ class ActionScriptManager:
                 item.get("x_jitter_px", 0),
                 item.get("y_jitter_px", 0),
                 item.get("duration_jitter_ms", 0),
+                x_norm=item.get("x_norm"),
+                y_norm=item.get("y_norm"),
+                runtime_normalize=runtime_normalize,
             )
         if action_type == "key":
             return KeyAction(item["vk_code"], item.get("hold_ms", 50), item.get("hold_jitter_ms", 0))
@@ -1176,7 +1215,7 @@ class ActionScriptManager:
         if action_type == "region_click":
             return self._parse_region_click(item)
         if action_type == "loop":
-            nested = [self._parse_action(sub_item) for sub_item in item.get("actions", [])]
+            nested = [self._parse_action(sub_item, runtime_normalize) for sub_item in item.get("actions", [])]
             nested = [action for action in nested if action is not None]
             count = int(item.get("count", 1))
             forever = bool(item.get("forever", False) or item.get("until_exit", False) or count <= 0)
@@ -1190,7 +1229,7 @@ class ActionScriptManager:
                 pause_jitter_ms=int(item.get("pause_jitter_ms", 0)),
             )
         if action_type == "timed":
-            nested = [self._parse_action(sub_item) for sub_item in item.get("actions", [])]
+            nested = [self._parse_action(sub_item, runtime_normalize) for sub_item in item.get("actions", [])]
             nested = [action for action in nested if action is not None]
             execute_ms = int(item.get("execute_ms", 0))
             sleep_ms = int(item.get("sleep_ms", 0))

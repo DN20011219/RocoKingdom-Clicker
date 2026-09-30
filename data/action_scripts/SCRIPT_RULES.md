@@ -309,3 +309,69 @@
 - `region_click` 例外：它只使用相对位移注入，多显示器与光标锁定场景都能正常工作
 - JSON 语法必须正确，少一个逗号都会导致加载失败
 - 建议每次修改后先保存，再回到程序里重新打开脚本列表
+
+## 脚本市场（v2 脚本包）
+
+脚本市场中的脚本使用 v2 包格式：在普通脚本之上增加市场元数据和作者环境声明，用于解决脚本在不同分辨率、不同鼠标速度下的跨平台使用问题。没有 `format_version` 字段的旧脚本按 v1 处理，行为不变。
+
+### v2 包结构
+
+```json
+{
+  "format_version": 2,
+  "market": {
+    "id": "roco.farm.daily",
+    "title": "日常农场一键挂机",
+    "author": "xxx",
+    "version": "1.2.0",
+    "game": "RocoKingdom",
+    "tags": ["farm"],
+    "description": "……"
+  },
+  "environment": {
+    "resolution": [1920, 1080],
+    "dpi_scale": 100,
+    "pointer_speed": 6,
+    "mouse_acceleration": false,
+    "game_mode": "fullscreen"
+  },
+  "name": "farm_daily",
+  "actions": []
+}
+```
+
+字段说明：
+
+- `market.id`：脚本唯一标识，必填，建议使用 `游戏.场景.用途` 的点分命名
+- `environment.resolution`：作者录制时的屏幕分辨率，坐标换算的基准
+- `environment.pointer_speed`：作者录制时的系统鼠标速度（1~11 档，默认 6）
+- `environment.mouse_acceleration`：作者录制时是否已关闭「提高指针精确度」（建议 `false` 即已关闭）
+
+### 归一化坐标与分辨率适配
+
+v2 包中的 `click`/`move` 动作会额外携带 `x_norm`/`y_norm`（0~1 浮点数，由作者分辨率换算得到），原始 `x`/`y` 像素坐标保留作为参考。下载导入时有两种换算方式：
+
+- **导入时换算（默认）**：按本机当前分辨率一次性换算为像素坐标落盘，之后可自由编辑
+- **运行时换算**：文件中带 `"runtime_normalize": true`，运行时每帧按当前分辨率动态换算，中途改分辨率也不会失效
+
+注意：不同宽高比之间换算（如 16:9 → 21:9）可能导致界面元素位置变形，建议先用与作者相同的分辨率测试。
+
+### 鼠标速度适配
+
+现有动作均为绝对坐标，不受系统鼠标速度影响；`environment` 中的鼠标速度声明用于导入时的环境比对提示。若未来引入相对位移动作，将按 `本机速度 / 作者速度` 自动缩放。
+
+### 上传流程（V1）
+
+1. 在主界面打开「🛒 市场」窗口，点击「上传我的脚本」
+2. 选择本地脚本并填写元数据，程序会自动采集本机环境并生成归一化坐标
+3. 生成 v2 上传包后，到市场仓库提交 PR：把文件放入 `scripts/` 目录，并在 `index.json` 中添加条目（`id/title/game/resolution/pointer_speed/version/file_url/updated_at`）
+4. 审核合并后即上架，其他用户可在市场窗口中搜索并下载
+
+### 安全限制
+
+市场脚本导入前会通过严格校验，不满足以下任一条件的包会被拒绝：
+
+- 仅接受 JSON，大小不超过 512KB
+- 动作类型仅限 `click/move/key/combo/wait/loop/timed`，字段为白名单
+- 动作嵌套深度不超过 8 层，动作总数不超过 10000
+- `vk_code` 必须在 0~255 范围内，禁止包含危险组合键（如 Ctrl+Alt+Del、Win+L 等）

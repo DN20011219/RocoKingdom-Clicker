@@ -4,10 +4,21 @@ import json
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
+from pathlib import Path
 import queue
 
 from RegionSelector import RegionSelector, format_region
 from MidiScore import normalize_key_label, note_name, parse_note_name
+from ScriptMarket import (
+    MarketConfig,
+    MarketError,
+    MarketExporter,
+    MarketImporter,
+    MarketIndexClient,
+    MarketValidationError,
+    ScriptAdapter,
+    sanitize_market_id,
+)
 
 
 # ──────────────────────────────────────────────
@@ -307,6 +318,526 @@ class BindingEditorDialog:
         self.win.destroy()
 
 
+# ──────────────────────────────────────────────
+# 脚本市场窗口（V1 静态市场）
+# ──────────────────────────────────────────────
+class MarketWindow:
+    """脚本市场：浏览/下载静态市场索引中的脚本，并支持把本地脚本打包上传。"""
+
+    def __init__(self, parent: "_DesktopWindow"):
+        self.parent = parent
+        from Clicker import get_app_dir
+        app_dir = get_app_dir()
+        self.configs_dir = app_dir / "data" / "clicker_configs"
+        self.scripts_dir = app_dir / "data" / "action_scripts"
+        self.market_config = MarketConfig(self.configs_dir)
+        self.importer = MarketImporter(self.scripts_dir, self.configs_dir)
+        self.cfg = self.market_config.load()
+        self.entries: list = []
+        self._filtered: list = []
+        self.local_env = ScriptAdapter.detect_local_env()
+        self._busy = False
+
+        self.win = tk.Toplevel(parent.root)
+        self.win.title("脚本市场")
+        self.win.geometry("1150x700")
+        self.win.minsize(920, 560)
+        self.win.configure(bg=parent.BG)
+        self.win.transient(parent.root)
+
+        self._setup_styles()
+        self._build_ui()
+        self._load_index_async()
+
+    # ── 样式与界面 ──────────────────────
+
+    def _setup_styles(self):
+        p = self.parent
+        style = ttk.Style(self.win)
+        style.configure("Market.Treeview", background=p.PANEL_BG,
+                        fieldbackground=p.PANEL_BG, foreground=p.TEXT,
+                        rowheight=30, borderwidth=0, font=("Segoe UI", 10))
+        style.configure("Market.Treeview.Heading", background=p.CARD_BG,
+                        foreground=p.TEXT, font=("Segoe UI", 10, "bold"),
+                        borderwidth=0, padding=6)
+        style.map("Market.Treeview",
+                  background=[("selected", p.SELECT_BG)],
+                  foreground=[("selected", "#ffffff")])
+
+    def _build_ui(self):
+        p = self.parent
+
+        # 顶部工具栏
+        top = tk.Frame(self.win, bg=p.BG)
+        top.pack(fill="x", padx=18, pady=(14, 6))
+        tk.Label(top, text="🛒 脚本市场", bg=p.BG, fg=p.TEXT,
+                 font=("Segoe UI", 16, "bold")).pack(side="left")
+        ttk.Button(top, text="⬆ 上传我的脚本", style="Secondary.TButton",
+                   command=self._on_upload).pack(side="right", padx=(8, 0))
+        ttk.Button(top, text="⚙ 市场设置",
+                   command=self._on_settings).pack(side="right", padx=(8, 0))
+        ttk.Button(top, text="↻ 刷新",
+                   command=self._load_index_async).pack(side="right")
+
+        # 搜索与筛选行
+        filter_row = tk.Frame(self.win, bg=p.BG)
+        filter_row.pack(fill="x", padx=18, pady=(0, 8))
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._apply_filter())
+        ttk.Entry(filter_row, textvariable=self.search_var, width=28).pack(side="left")
+        self.game_filter_var = tk.StringVar(value="全部游戏")
+        self.game_filter_var.trace_add("write", lambda *_: self._apply_filter())
+        self.game_combo = ttk.Combobox(filter_row, textvariable=self.game_filter_var,
+                                       values=["全部游戏"], width=18, state="readonly")
+        self.game_combo.pack(side="left", padx=(8, 0))
+        tk.Label(filter_row, text="下载前请留意分辨率与鼠标速度兼容性提示",
+                 bg=p.BG, fg=p.TEXT_MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(12, 0))
+
+        # 主体：左侧列表 + 右侧详情
+        main = tk.Frame(self.win, bg=p.BG)
+        main.pack(fill="both", expand=True, padx=18)
+        main.columnconfigure(0, weight=3)
+        main.columnconfigure(1, weight=2)
+        main.rowconfigure(0, weight=1)
+
+        tree_frame = tk.Frame(main, bg=p.PANEL_BG)
+        tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        columns = ("title", "game", "res", "speed", "version", "status")
+        self.tree = ttk.Treeview(tree_frame, style="Market.Treeview",
+                                 columns=columns, show="headings", selectmode="browse")
+        for col, text, width, anchor in (
+                ("title", "脚本名称", 240, "w"),
+                ("game", "游戏", 120, "w"),
+                ("res", "分辨率", 100, "center"),
+                ("speed", "鼠标速度", 80, "center"),
+                ("version", "版本", 70, "center"),
+                ("status", "状态", 80, "center")):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor)
+        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical",
+                                    command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", lambda *_: self._refresh_detail())
+
+        # 右侧详情面板
+        detail = tk.Frame(main, bg=p.PANEL_BG)
+        detail.grid(row=0, column=1, sticky="nsew")
+        self.detail_title = tk.Label(detail, text="选择一个脚本查看详情", bg=p.PANEL_BG,
+                                     fg=p.TEXT, font=("Segoe UI", 13, "bold"),
+                                     anchor="w", justify="left", wraplength=420)
+        self.detail_title.pack(fill="x", padx=14, pady=(14, 4))
+        self.detail_meta = tk.Label(detail, text="", bg=p.PANEL_BG,
+                                    fg=p.TEXT_MUTED, font=("Segoe UI", 9),
+                                    anchor="w", justify="left", wraplength=420)
+        self.detail_meta.pack(fill="x", padx=14)
+        self.detail_desc = tk.Text(detail, height=6, wrap="word", relief="flat",
+                                   bg=p.BG, fg=p.TEXT, font=("Segoe UI", 10),
+                                   padx=10, pady=8, state="disabled")
+        self.detail_desc.pack(fill="x", padx=14, pady=(10, 4))
+
+        tk.Label(detail, text="环境兼容性检查（对比本机）", bg=p.PANEL_BG,
+                 fg=p.ACCENT, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(8, 4))
+        self.issues_frame = tk.Frame(detail, bg=p.PANEL_BG)
+        self.issues_frame.pack(fill="x", padx=14)
+
+        btn_frame = tk.Frame(detail, bg=p.PANEL_BG)
+        btn_frame.pack(fill="x", padx=14, pady=(12, 14))
+        self.btn_download = ttk.Button(btn_frame, text="⬇ 下载并导入",
+                                       style="Primary.TButton",
+                                       command=self._on_download_selected,
+                                       state="disabled")
+        self.btn_download.pack(fill="x")
+
+        # 底部状态栏
+        self.status_var = tk.StringVar(value="正在加载市场…")
+        tk.Label(self.win, textvariable=self.status_var, bg=p.PANEL_BG,
+                 fg=p.TEXT_MUTED, font=("Segoe UI", 9), anchor="w",
+                 padx=12, pady=6).pack(fill="x", side="bottom")
+
+    # ── 工具方法 ──────────────────────
+
+    @staticmethod
+    def _entry_field(entry: dict, key: str, default=""):
+        market = entry.get("market") if isinstance(entry.get("market"), dict) else {}
+        return entry.get(key, market.get(key, default))
+
+    @staticmethod
+    def _entry_env(entry: dict) -> dict:
+        env = entry.get("environment")
+        if isinstance(env, dict):
+            return env
+        return {k: entry.get(k) for k in
+                ("resolution", "pointer_speed", "mouse_acceleration",
+                 "dpi_scale", "game_mode") if entry.get(k) is not None}
+
+    @staticmethod
+    def _res_text(value) -> str:
+        if isinstance(value, list) and len(value) == 2:
+            return f"{value[0]}x{value[1]}"
+        return str(value) if value else "未知"
+
+    def _set_status(self, text: str):
+        self.status_var.set(text)
+
+    # ── 索引加载 ──────────────────────
+
+    def _load_index_async(self):
+        if self._busy:
+            return
+        url = self.cfg.get("index_url", "")
+        if not url:
+            self._set_status("尚未配置市场地址，请点击「⚙ 市场设置」填写 index_url")
+            return
+        self._busy = True
+        self._set_status("正在加载市场索引…")
+
+        def worker():
+            entries = MarketIndexClient(url).fetch_index()
+            self.win.after(0, lambda: self._on_index_loaded(entries))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_index_loaded(self, entries):
+        self._busy = False
+        if entries is None:
+            self.entries = []
+            self._set_status("市场索引加载失败（网络异常或地址无效），本地脚本功能不受影响")
+        else:
+            self.entries = entries
+            self._set_status(f"已加载 {len(entries)} 个市场脚本")
+        games = sorted({str(self._entry_field(e, "game") or "未分类") for e in self.entries})
+        current = self.game_filter_var.get()
+        self.game_combo.configure(values=["全部游戏"] + games)
+        if current in games:
+            self.game_filter_var.set(current)
+        else:
+            self.game_filter_var.set("全部游戏")
+        self._apply_filter()
+
+    def _apply_filter(self):
+        keyword = self.search_var.get().strip().lower()
+        game = self.game_filter_var.get()
+        rows = []
+        for entry in self.entries:
+            if game != "全部游戏" and str(self._entry_field(entry, "game") or "未分类") != game:
+                continue
+            if keyword:
+                haystack = " ".join([
+                    str(self._entry_field(entry, "title")),
+                    str(self._entry_field(entry, "id")),
+                    str(self._entry_field(entry, "game")),
+                    " ".join(self._entry_field(entry, "tags", []) or []),
+                ]).lower()
+                if keyword not in haystack:
+                    continue
+            rows.append(entry)
+
+        self._filtered = rows
+        self.tree.delete(*self.tree.get_children())
+        status_text = {"not_installed": "未安装", "up_to_date": "已安装",
+                       "update_available": "可更新"}
+        for idx, entry in enumerate(rows):
+            speed = self._entry_field(entry, "pointer_speed", "")
+            self.tree.insert("", "end", iid=str(idx), values=(
+                self._entry_field(entry, "title", self._entry_field(entry, "id")),
+                self._entry_field(entry, "game", "未分类"),
+                self._res_text(self._entry_env(entry).get("resolution")),
+                f"{speed}/11" if speed else "未知",
+                self._entry_field(entry, "version", ""),
+                status_text.get(self.importer.installed_status(
+                    {"id": self._entry_field(entry, "id"),
+                     "version": self._entry_field(entry, "version")}), ""),
+            ))
+        self._refresh_detail()
+
+    def _selected_entry(self):
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        try:
+            return self._filtered[int(selection[0])]
+        except (ValueError, IndexError):
+            return None
+
+    # ── 详情与兼容性提示 ──────────────────────
+
+    def _refresh_detail(self):
+        p = self.parent
+        entry = self._selected_entry()
+        for child in self.issues_frame.winfo_children():
+            child.destroy()
+        if entry is None:
+            self.detail_title.configure(text="选择一个脚本查看详情")
+            self.detail_meta.configure(text="")
+            self.detail_desc.configure(state="normal")
+            self.detail_desc.delete("1.0", "end")
+            self.detail_desc.configure(state="disabled")
+            self.btn_download.configure(state="disabled")
+            return
+
+        env = self._entry_env(entry)
+        author = self._entry_field(entry, "author", "未知")
+        version = self._entry_field(entry, "version", "")
+        game = self._entry_field(entry, "game", "未分类")
+        self.detail_title.configure(text=str(self._entry_field(entry, "title")))
+        self.detail_meta.configure(
+            text=f"作者：{author}    版本：{version}    游戏：{game}\n"
+                 f"作者环境：分辨率 {self._res_text(env.get('resolution'))}"
+                 f"，鼠标速度 {env.get('pointer_speed', '未知')}/11")
+        self.detail_desc.configure(state="normal")
+        self.detail_desc.delete("1.0", "end")
+        self.detail_desc.insert("1.0", str(self._entry_field(entry, "description", "（无描述）")))
+        self.detail_desc.configure(state="disabled")
+
+        for level, msg in ScriptAdapter.compare_env(env, self.local_env):
+            color = p.WARNING if level == "warn" else p.TEXT_MUTED
+            prefix = "⚠" if level == "warn" else "✓"
+            tk.Label(self.issues_frame, text=f"{prefix} {msg}", bg=p.PANEL_BG,
+                     fg=color, font=("Segoe UI", 9), anchor="w",
+                     justify="left", wraplength=420).pack(fill="x", pady=1)
+
+        status = self.importer.installed_status(
+            {"id": self._entry_field(entry, "id"),
+             "version": self._entry_field(entry, "version")})
+        self.btn_download.configure(state="normal")
+        self.btn_download.configure(text={
+            "not_installed": "⬇ 下载并导入",
+            "up_to_date": "✓ 已安装（重新导入）",
+            "update_available": "⬇ 更新到新版本",
+        }.get(status, "⬇ 下载并导入"))
+
+    # ── 下载导入 ──────────────────────
+
+    def _on_download_selected(self):
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        if not self.cfg.get("index_url"):
+            messagebox.showwarning("未配置市场", "请先在「市场设置」中填写 index_url",
+                                   parent=self.win)
+            return
+
+        p = self.parent
+        dlg = tk.Toplevel(self.win)
+        dlg.title("导入脚本")
+        dlg.configure(bg=p.BG)
+        dlg.transient(self.win)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text=f"导入：{self._entry_field(entry, 'title')}",
+                 bg=p.BG, fg=p.TEXT, font=("Segoe UI", 12, "bold")
+            ).pack(anchor="w", padx=16, pady=(14, 6))
+
+        env = self._entry_env(entry)
+        for level, msg in ScriptAdapter.compare_env(env, self.local_env):
+            color = p.WARNING if level == "warn" else p.TEXT_MUTED
+            tk.Label(dlg, text=f"{'⚠' if level == 'warn' else '✓'} {msg}",
+                     bg=p.BG, fg=color, font=("Segoe UI", 9), anchor="w",
+                     justify="left", wraplength=460).pack(fill="x", padx=16, pady=1)
+
+        tk.Label(dlg, text="坐标换算方式：", bg=p.BG, fg=p.TEXT,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(12, 2))
+        mode_var = tk.StringVar(value="denormalize")
+        for value, text in (
+                ("denormalize", "导入时按本机分辨率换算坐标（推荐，可自由编辑）"),
+                ("runtime", "保留归一化坐标，运行时动态换算（分辨率变化后仍有效）")):
+            tk.Radiobutton(dlg, text=text, value=value, variable=mode_var,
+                           bg=p.BG, fg=p.TEXT, selectcolor=p.CARD_BG,
+                           activebackground=p.BG, activeforeground=p.TEXT,
+                           font=("Segoe UI", 10), anchor="w").pack(fill="x", padx=16)
+
+        btn_row = tk.Frame(dlg, bg=p.BG)
+        btn_row.pack(fill="x", padx=16, pady=14)
+
+        def do_import():
+            dlg.destroy()
+            self._do_import(entry, mode_var.get())
+
+        ttk.Button(btn_row, text="确定导入", style="Primary.TButton",
+                   command=do_import).pack(side="right", padx=(8, 0))
+        ttk.Button(btn_row, text="取消", command=dlg.destroy).pack(side="right")
+
+    def _do_import(self, entry: dict, mode: str):
+        self._busy = True
+        self._set_status("正在下载脚本…")
+        url = self.cfg.get("index_url", "")
+        file_url = entry.get("file_url", "")
+
+        def worker():
+            result, err = None, None
+            try:
+                raw = MarketIndexClient(url).download_script(file_url)
+                result = self.importer.import_raw(raw, mode=mode)
+            except (MarketValidationError, MarketError) as e:
+                err = str(e)
+            except Exception as e:
+                err = f"导入失败: {e}"
+            self.win.after(0, lambda: self._on_import_done(result, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_import_done(self, result, err):
+        self._busy = False
+        if err:
+            self._set_status("导入失败")
+            messagebox.showerror("导入失败", err, parent=self.win)
+            return
+        issues_text = "\n".join(f"· {msg}" for _, msg in result["issues"]) or "无"
+        self._set_status(f"已导入：{result['stem']}")
+        messagebox.showinfo(
+            "导入成功",
+            f"脚本已导入到本地脚本列表：{result['stem']}\n\n环境兼容性提示：\n{issues_text}",
+            parent=self.win)
+        self.parent.refresh_all()
+        self._apply_filter()
+
+    # ── 上传（生成 v2 包 + PR 引导） ──────────────────────
+
+    def _on_upload(self):
+        try:
+            scripts = self.parent.js_api.list_scripts() or []
+        except Exception:
+            scripts = []
+        if not scripts:
+            messagebox.showinfo("没有可上传的脚本", "本地脚本列表为空，请先创建脚本",
+                                parent=self.win)
+            return
+
+        p = self.parent
+        dlg = tk.Toplevel(self.win)
+        dlg.title("上传我的脚本")
+        dlg.configure(bg=p.BG)
+        dlg.transient(self.win)
+        dlg.grab_set()
+        dlg.geometry("480x560")
+
+        tk.Label(dlg, text="填写市场元数据（上传信息）", bg=p.BG, fg=p.TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=16, pady=(14, 8))
+
+        def add_field(label, default="", height=1):
+            tk.Label(dlg, text=label, bg=p.BG, fg=p.TEXT_MUTED,
+                     font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 1))
+            if height > 1:
+                text = tk.Text(dlg, height=height, wrap="word", relief="flat",
+                               bg=p.CARD_BG, fg=p.TEXT, insertbackground=p.TEXT,
+                               font=("Segoe UI", 10), padx=8, pady=6)
+                text.pack(fill="x", padx=16)
+                if default:
+                    text.insert("1.0", default)
+                return text
+            var = tk.StringVar(value=default)
+            ttk.Entry(dlg, textvariable=var).pack(fill="x", padx=16)
+            return var
+
+        script_var = tk.StringVar(value=scripts[0])
+        tk.Label(dlg, text="选择本地脚本", bg=p.BG, fg=p.TEXT_MUTED,
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(2, 1))
+        ttk.Combobox(dlg, textvariable=script_var, values=scripts,
+                     state="readonly").pack(fill="x", padx=16)
+
+        id_var = add_field("脚本 id（唯一标识，如 roco.farm.daily）")
+        title_var = add_field("标题")
+        author_var = add_field("作者")
+        version_var = add_field("版本", "1.0.0")
+        game_var = add_field("适配游戏", "RocoKingdom")
+        tags_var = add_field("标签（逗号分隔）")
+        desc_var = add_field("描述", height=3)
+
+        tk.Label(dlg,
+                 text="本机环境将自动写入包内："
+                      f"分辨率 {self._res_text(self.local_env.get('resolution'))}，"
+                      f"鼠标速度 {self.local_env.get('pointer_speed') or '未知'}/11",
+                 bg=p.BG, fg=p.TEXT_MUTED, font=("Segoe UI", 9),
+                 wraplength=440, justify="left").pack(fill="x", padx=16, pady=(10, 0))
+
+        def do_export():
+            stem = script_var.get()
+            meta = {
+                "id": id_var.get().strip(),
+                "title": title_var.get().strip(),
+                "author": author_var.get().strip(),
+                "version": version_var.get().strip() or "1.0.0",
+                "game": game_var.get().strip(),
+                "tags": [t.strip() for t in tags_var.get().split(",") if t.strip()],
+                "description": desc_var.get("1.0", "end").strip(),
+            }
+            try:
+                package = MarketExporter.build_package(
+                    self.scripts_dir / f"{stem}.json", meta)
+            except Exception as e:
+                messagebox.showerror("打包失败", str(e), parent=dlg)
+                return
+            default_name = f"market_{sanitize_market_id(meta['id'])}.json"
+            out = filedialog.asksaveasfilename(
+                parent=dlg, defaultextension=".json", initialfile=default_name,
+                filetypes=[("JSON 文件", "*.json")])
+            if not out:
+                return
+            try:
+                MarketExporter.export_to_file(package, Path(out))
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e), parent=dlg)
+                return
+            repo = self.cfg.get("repo_url") or "（未配置，请在「市场设置」中填写）"
+            dlg.destroy()
+            messagebox.showinfo(
+                "上传包已生成",
+                f"已生成：{out}\n\n"
+                "V1 上传流程：在市场仓库提交 PR，把该文件放入 scripts/ 目录，"
+                "并在 index.json 中添加对应条目（id/title/game/resolution/"
+                "pointer_speed/version/file_url）。\n\n市场仓库：" + repo,
+                parent=self.win)
+
+        btn_row = tk.Frame(dlg, bg=p.BG)
+        btn_row.pack(fill="x", padx=16, pady=14, side="bottom")
+        ttk.Button(btn_row, text="生成上传包", style="Primary.TButton",
+                   command=do_export).pack(side="right", padx=(8, 0))
+        ttk.Button(btn_row, text="取消", command=dlg.destroy).pack(side="right")
+
+    # ── 市场设置 ──────────────────────
+
+    def _on_settings(self):
+        p = self.parent
+        dlg = tk.Toplevel(self.win)
+        dlg.title("市场设置")
+        dlg.configure(bg=p.BG)
+        dlg.transient(self.win)
+        dlg.grab_set()
+        dlg.geometry("520x220")
+
+        tk.Label(dlg, text="市场索引地址（index.json 的 http/https 链接）",
+                 bg=p.BG, fg=p.TEXT_MUTED, font=("Segoe UI", 9)
+            ).pack(anchor="w", padx=16, pady=(14, 1))
+        index_var = tk.StringVar(value=self.cfg.get("index_url", ""))
+        ttk.Entry(dlg, textvariable=index_var).pack(fill="x", padx=16)
+
+        tk.Label(dlg, text="市场仓库地址（上传 PR 用，可选）",
+                 bg=p.BG, fg=p.TEXT_MUTED, font=("Segoe UI", 9)
+            ).pack(anchor="w", padx=16, pady=(10, 1))
+        repo_var = tk.StringVar(value=self.cfg.get("repo_url", ""))
+        ttk.Entry(dlg, textvariable=repo_var).pack(fill="x", padx=16)
+
+        def do_save():
+            self.cfg = {"index_url": index_var.get().strip(),
+                        "repo_url": repo_var.get().strip()}
+            try:
+                self.market_config.save(self.cfg)
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e), parent=dlg)
+                return
+            dlg.destroy()
+            self._load_index_async()
+
+        btn_row = tk.Frame(dlg, bg=p.BG)
+        btn_row.pack(fill="x", padx=16, pady=14)
+        ttk.Button(btn_row, text="保存并刷新", style="Primary.TButton",
+                   command=do_save).pack(side="right", padx=(8, 0))
+        ttk.Button(btn_row, text="取消", command=dlg.destroy).pack(side="right")
+
+
 class _DesktopWindow:
     # ── 配色方案（现代深蓝/靛蓝主题） ──
     BG          = "#0f172a"  # 主背景（深蓝灰）
@@ -341,6 +872,8 @@ class _DesktopWindow:
         self._script_map: dict[str, tuple[str, str]] = {}
         # 抑制列表选择事件（刷新时避免触发切换确认弹窗）
         self._suppress_select_event: bool = False
+        # 脚本市场窗口（单例）
+        self._market_window: MarketWindow | None = None
 
         self._build_ui()
         self.refresh_all()
@@ -667,15 +1200,18 @@ class _DesktopWindow:
                                     command=self._on_stop_current, state="disabled")
         self.btn_stop.grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
-        # 第二行：删除 / 刷新
+        # 第二行：删除 / 刷新 / 脚本市场
         script_btns2 = ttk.Frame(center)
         script_btns2.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         script_btns2.columnconfigure(0, weight=1)
         script_btns2.columnconfigure(1, weight=1)
+        script_btns2.columnconfigure(2, weight=1)
         ttk.Button(script_btns2, text="🗑 删除",
                    command=self._on_delete_selected).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(script_btns2, text="↻ 刷新",
-                   command=self.refresh_all).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+                   command=self.refresh_all).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(script_btns2, text="🛒 市场",
+                   command=self._on_open_market).grid(row=0, column=2, sticky="ew", padx=(4, 0))
 
         # ── 右栏：快捷键设置 + 路径扰动算法 ─────────
         right = ttk.Frame(body)
@@ -2679,6 +3215,18 @@ class _DesktopWindow:
                 ToastWindow(self.root, text, duration)
             except queue.Empty:
                 break
+
+    def _on_open_market(self):
+        """打开脚本市场窗口（单例，已打开则置顶）。"""
+        if self._market_window is not None:
+            try:
+                if self._market_window.win.winfo_exists():
+                    self._market_window.win.deiconify()
+                    self._market_window.win.lift()
+                    return
+            except Exception:
+                pass
+        self._market_window = MarketWindow(self)
 
     def run(self):
         self.root.mainloop()
