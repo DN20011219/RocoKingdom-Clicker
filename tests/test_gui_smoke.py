@@ -521,7 +521,7 @@ class RegionCaptureRoutingTest(unittest.TestCase):
     这个测试锁住回归。
     """
 
-    _EXPECTED = (("拖拽圈选", "drag"), ("拾取窗口", "window"), ("录制区域", "drag"))
+    _EXPECTED = (("拖拽圈选", "drag"), ("拾取窗口", "window"))
 
     def setUp(self):
         self.api = StubApi()
@@ -547,10 +547,10 @@ class RegionCaptureRoutingTest(unittest.TestCase):
             pass
 
     def _capture_buttons(self):
-        """按标签文字找出三个捕获按钮。
+        """按标签文字找出捕获按钮。
 
-        用包含匹配而不是全等：「🎙 录制区域」的标签会被热键刷新逻辑改写成
-        「🎙 录制区域 (F6)」，写死全等会在改热键显示时莫名其妙地失败。
+        用包含匹配而不是全等：「📐 拖拽圈选」的标签会被热键刷新逻辑改写成
+        「📐 拖拽圈选 (F6)」，写死全等会在改热键显示时莫名其妙地失败。
         """
         found = {}
         for widget in self.app._rc_capture_widgets:
@@ -563,9 +563,25 @@ class RegionCaptureRoutingTest(unittest.TestCase):
                     found[label] = (widget, mode)
         return found
 
-    def test_all_three_capture_buttons_exist(self):
+    def test_all_capture_buttons_exist(self):
         found = self._capture_buttons()
         self.assertEqual(sorted(found), sorted(label for label, _ in self._EXPECTED))
+
+    def test_redundant_record_region_button_is_gone(self):
+        """「🎙 录制区域」与拖拽圈选完全等价，已删除；别让它悄悄回来。"""
+        for widget in self.app._rc_capture_widgets:
+            try:
+                text = str(widget.cget("text"))
+            except Exception:
+                continue
+            self.assertNotIn("录制区域", text)
+
+    def test_drag_button_carries_the_hotkey_hint(self):
+        """F6 的名字现在标在拖拽圈选按钮上，删按钮不能把热键提示一起弄丢。"""
+        self.app.refresh_status()
+        text = str(self.app._rc_record_btn.cget("text"))
+        self.assertIn("拖拽圈选", text)
+        self.assertIn("F6", text)
 
     def test_buttons_go_through_backend_not_selector(self):
         direct_calls: list = []

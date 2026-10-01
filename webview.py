@@ -1879,16 +1879,19 @@ class _DesktopWindow:
 
         cap_row = tk.Frame(region_frame, bg=self.BG)
         cap_row.pack(fill="x", pady=(0, 6))
+        # 「拖拽圈选」与 F6 热键是同一个动作，所以只留一个按钮并把热键名标在它上面。
+        # 这里原本还有第三个「🎙 录制区域」按钮，与拖拽圈选完全等价（都投递 drag），
+        # 只是多绕一跳队列，纯属重复；而且它的名字容易被误读成"录制区域内的操作"，
+        # 真正的录制是 F7 那套。
         for text, mode in (("📐 拖拽圈选", "drag"), ("🪟 拾取窗口", "window")):
             btn = ttk.Button(cap_row, text=text,
                              command=lambda m=mode: self._on_region_capture_request(m))
-            btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
+            btn.pack(side="left", expand=True, fill="x",
+                     padx=(0, 4) if mode == "drag" else 0)
             self._rc_capture_widgets.append(btn)
-        hotkey_btn = ttk.Button(cap_row, text="🎙 录制区域",
-                                command=lambda: self._on_region_capture_request("drag"))
-        hotkey_btn.pack(side="left", expand=True, fill="x")
-        self._rc_capture_widgets.append(hotkey_btn)
-        self._rc_record_btn = hotkey_btn
+            if mode == "drag":
+                # 热键刷新逻辑靠这个引用把 F6 的名字写到按钮上
+                self._rc_record_btn = btn
 
         tk.Label(region_frame, textvariable=self._rc_region_status,
                  font=("Segoe UI", 9), fg=self.TEXT_MUTED, bg=self.BG,
@@ -3145,7 +3148,7 @@ class _DesktopWindow:
             self.btn_rec_stop.configure(text=f"■ 保存 ({stop_key})")
             self.btn_rec_cancel.configure(text=f"✕ 取消 ({cancel_key})")
             self._rc_record_btn.configure(
-                text=f"🎙 录制区域 ({hotkeys.get('record_region', 'F6')})")
+                text=f"📐 拖拽圈选 ({hotkeys.get('record_region', 'F6')})")
         except Exception:
             pass
 
