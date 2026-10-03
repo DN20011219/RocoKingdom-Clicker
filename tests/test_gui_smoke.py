@@ -7,6 +7,10 @@ webview.py 里几千行 Tkinter 代码只有在真正构建窗口时才会执行
   按钮状态与明细文本，键位编辑对话框往返正常。
 - RegionCaptureRoutingTest：第四栏三个区域捕获按钮都走后端队列，因而都吃得到
   ClickerManager 里的互斥检查。
+- OutlineGeometryTest：常驻边框的几何计算——边框必须落在区域外侧，否则覆盖层
+  会压住可点击像素。
+- RegionOutlineSyncTest：常驻边框的生命周期（不闪烁重建、停止即销毁、穿透失败
+  不重试）。
 
 跑测试时屏幕上会闪一下窗口，构造完立即 withdraw + destroy。
 """
@@ -31,6 +35,8 @@ except Exception:  # 无显示环境（纯 CI 容器）时跳过整组测试
 
 import webview  # noqa: E402
 from ConfigManager import DEFAULT_MUSIC_PLAYER  # noqa: E402
+from RegionSelector import (OUTLINE_BORDER, OUTLINE_MARGIN,  # noqa: E402
+                            RegionOutlineUnavailable, outline_geometry)
 
 HANDPAN_BINDINGS = [dict(item) for item in DEFAULT_MUSIC_PLAYER["bindings"]]
 
@@ -605,6 +611,201 @@ class RegionCaptureRoutingTest(unittest.TestCase):
 
         self.app._drain_region_requests()
         self.assertEqual(created, ["window"])
+
+
+class OutlineGeometryTest(unittest.TestCase):
+    """常驻边框的几何计算（纯计算，不需要显示设备）。"""
+
+    PAD = OUTLINE_BORDER + OUTLINE_MARGIN
+
+    def test_window_is_the_region_expanded_by_the_pad(self):
+        w, h, x, y = outline_geometry(
+            {"x": 100, "y": 200, "width": 320, "height": 240})
+        self.assertEqual(
+            (w, h, x, y),
+            (320 + self.PAD * 2, 240 + self.PAD * 2, 100 - self.PAD, 200 - self.PAD))
+
+    def test_negative_coordinates_survive(self):
+        """副屏在主屏左侧/上方时 x、y 为负，不能在这里被夹到 0。"""
+        w, h, x, y = outline_geometry(
+            {"x": -1920, "y": -300, "width": 800, "height": 600})
+        self.assertEqual((x, y), (-1920 - self.PAD, -300 - self.PAD))
+        self.assertEqual((w, h), (800 + self.PAD * 2, 600 + self.PAD * 2))
+
+    def test_border_band_does_not_overlap_the_region(self):
+        """线带必须完全落在区域外侧。
+
+        Tk 的线宽居中于路径，RegionOutline._draw() 把路径取在 pad - border/2，
+        于是线带覆盖 [pad - border, pad]；区域在窗口坐标系里从 pad 开始。两者只
+        在 pad 处相邻、不重叠，所以覆盖层没有任何不透明像素压在可点击区域上。
+        这是 RegionOutline 三层穿透保障里的第一层，也是唯一不依赖 Tk 分层窗口
+        与 Win32 扩展样式的一层——那两层都可能失败。
+        """
+        band_outer = self.PAD - OUTLINE_BORDER
+        band_inner = band_outer + OUTLINE_BORDER
+        region_start = self.PAD
+        self.assertLessEqual(band_inner, region_start)
+        self.assertGreaterEqual(band_outer, 0, "留白不足，边框会被窗口边界裁掉")
+
+    def test_invalid_region_returns_none(self):
+        bad = [
+            {"x": 0, "y": 0, "width": 0, "height": 10},
+            {"x": 0, "y": 0, "width": 10, "height": -5},
+            {"x": 0, "y": 0, "width": 10},
+            {"x": "a", "y": 0, "width": 10, "height": 10},
+            {},
+            None,
+        ]
+        for region in bad:
+            with self.subTest(region=region):
+                self.assertIsNone(outline_geometry(region))
+
+
+@unittest.skipUnless(TK_AVAILABLE, "当前环境没有可用的显示设备")
+class RegionOutlineSyncTest(unittest.TestCase):
+    """常驻边框的生命周期。
+
+    边框由 500ms 状态轮询驱动，所以真正容易出的问题不是"画不出来"，而是：
+    每拍都重建导致闪烁、停止后留残窗、穿透失败后每 500ms 重试一次。
+
+    RegionOutline 换成记录桩：真的建 Toplevel 会往屏幕上画东西，而穿透路径依赖
+    真实 HWND 与分层窗口支持，在测试环境里不可复现。
+    """
+
+    REGION = {"x": 100, "y": 200, "width": 320, "height": 240}
+
+    def setUp(self):
+        self.api = StubApi()
+        self._real = (webview.messagebox, webview.RegionOutline, webview.push_toast)
+        self.toasts: list = []
+        webview.messagebox = StubMessageBox()
+        webview.push_toast = lambda msg, duration=2.0: self.toasts.append(msg)
+        self.created: list = []
+        webview.RegionOutline = self._make_stub()
+        self.addCleanup(self._restore)
+
+        self.app = webview._DesktopWindow("测试窗口", self.api, 2540, 1300)
+        try:
+            self.app.root.withdraw()
+        except Exception:
+            pass
+        self.addCleanup(self._destroy)
+        self._set_region(self.REGION)
+
+    def _make_stub(self, exc=None):
+        created = self.created
+
+        class StubOutline:
+            def __init__(self, root, region, border=OUTLINE_BORDER):
+                if exc is not None:
+                    raise exc
+                self.region = dict(region)
+                self.destroyed = False
+                created.append(self)
+
+            def destroy(self):
+                self.destroyed = True
+
+        return StubOutline
+
+    def _restore(self):
+        webview.messagebox, webview.RegionOutline, webview.push_toast = self._real
+
+    def _destroy(self):
+        try:
+            self.app.root.destroy()
+        except Exception:
+            pass
+
+    def _set_region(self, region):
+        for key, src in (("region_x", "x"), ("region_y", "y"),
+                         ("region_width", "width"), ("region_height", "height")):
+            self.app._rc_vars[key].set(str(int(region[src])))
+
+    def _poll(self, active: bool):
+        """模拟一拍状态轮询。"""
+        self.app._update_region_ui({"region_click_active": active,
+                                    "region_click_total": 0,
+                                    "region_click_spots": 0})
+
+    # ---- 基本生命周期 ----
+
+    def test_outline_appears_when_running(self):
+        self._poll(True)
+        self.assertEqual(len(self.created), 1)
+        self.assertEqual(self.created[0].region, self.REGION)
+        self.assertIs(self.app._rc_outline, self.created[0])
+
+    def test_no_outline_when_idle(self):
+        self._poll(False)
+        self.assertEqual(self.created, [])
+        self.assertIsNone(self.app._rc_outline)
+
+    def test_repeated_polls_do_not_recreate(self):
+        """每 500ms 一拍，重建会让边框闪，而且建 Toplevel 并不便宜。"""
+        for _ in range(5):
+            self._poll(True)
+        self.assertEqual(len(self.created), 1)
+        self.assertFalse(self.created[0].destroyed)
+
+    def test_outline_destroyed_when_stopped(self):
+        self._poll(True)
+        self._poll(False)
+        self.assertTrue(self.created[0].destroyed)
+        self.assertIsNone(self.app._rc_outline)
+        self.assertIsNone(self.app._rc_outline_region)
+
+    def test_region_change_while_running_recreates(self):
+        self._poll(True)
+        moved = {"x": 400, "y": 500, "width": 200, "height": 150}
+        self._set_region(moved)
+        self._poll(True)
+        self.assertEqual(len(self.created), 2)
+        self.assertTrue(self.created[0].destroyed)
+        self.assertEqual(self.created[1].region, moved)
+
+    # ---- 开关 ----
+
+    def test_toggle_off_destroys_outline(self):
+        self._poll(True)
+        self.app._rc_outline_var.set(False)
+        self.app._sync_region_outline()
+        self.assertTrue(self.created[0].destroyed)
+        self.assertIsNone(self.app._rc_outline)
+
+    def test_toggle_on_while_running_creates_outline(self):
+        self.app._rc_outline_var.set(False)
+        self._poll(True)
+        self.assertEqual(self.created, [])
+        self.app._rc_outline_var.set(True)
+        self.app._sync_region_outline()
+        self.assertEqual(len(self.created), 1)
+
+    # ---- 退化路径 ----
+
+    def test_invalid_region_does_not_create_outline(self):
+        self.app._rc_vars["region_width"].set("0")
+        self._poll(True)
+        self.assertEqual(self.created, [])
+        self.assertIsNone(self.app._rc_outline)
+
+    def test_unavailable_outline_is_not_retried(self):
+        """穿透做不到时只提示一次，之后每拍都重试会疯狂建/销 Toplevel。"""
+        webview.RegionOutline = self._make_stub(
+            RegionOutlineUnavailable("no click-through"))
+        for _ in range(4):
+            self._poll(True)
+        self.assertEqual(self.created, [])
+        self.assertIsNone(self.app._rc_outline)
+        self.assertEqual(len(self.toasts), 1, "应该只 toast 一次")
+        self.assertIn("点击穿透", self.toasts[0])
+
+    def test_unexpected_error_is_also_not_retried(self):
+        webview.RegionOutline = self._make_stub(RuntimeError("boom"))
+        for _ in range(3):
+            self._poll(True)
+        self.assertEqual(len(self.toasts), 1)
+        self.assertIn("boom", self.toasts[0])
 
 
 if __name__ == "__main__":

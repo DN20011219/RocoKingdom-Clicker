@@ -7,7 +7,8 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 from pathlib import Path
 import queue
 
-from RegionSelector import RegionSelector, format_region
+from RegionSelector import (RegionSelector, RegionOutline,
+                            RegionOutlineUnavailable, format_region)
 from MidiScore import normalize_key_label, note_name, parse_note_name
 from ScriptMarket import (
     MarketConfig,
@@ -1827,6 +1828,13 @@ class _DesktopWindow:
         self._rc_region_status = tk.StringVar(value="当前区域：未设置")
         self._rc_run_status = tk.StringVar(value="未运行")
         self._rc_selector = RegionSelector(self.root)
+        # 运行时常驻边框（见 RegionOutline）。开关只存在 GUI 侧、不落盘：
+        # 它是纯显示偏好，塞进 region_click 配置会平白多出一批后端字段与校验。
+        self._rc_outline_var = tk.BooleanVar(value=True)
+        self._rc_outline: RegionOutline | None = None
+        self._rc_outline_region: dict | None = None
+        self._rc_region_running = False
+        self._rc_outline_unavailable = False
 
         # ---- 组 1：目标区域 ----
         region_frame = ttk.LabelFrame(panel, text="  目标区域  ", padding=12)
@@ -1973,6 +1981,10 @@ class _DesktopWindow:
         ttk.Button(rc_save, text="💾 存为脚本",
                    command=self._on_save_region_as_script
                    ).pack(side="left", expand=True, fill="x")
+
+        ttk.Checkbutton(run_frame, text="🔲 运行时显示区域边框",
+                        variable=self._rc_outline_var,
+                        command=self._sync_region_outline).pack(fill="x", pady=(0, 8))
 
         self._rc_run_label = tk.Label(run_frame, textvariable=self._rc_run_status,
                                       font=("Segoe UI", 9, "bold"),
@@ -2161,6 +2173,49 @@ class _DesktopWindow:
         else:
             self._rc_region_status.set("当前区域：未设置")
 
+    def _sync_region_outline(self):
+        """按运行状态与开关同步常驻边框。只应在 Tk 主线程调用。
+
+        由 ``_update_region_ui()`` 每 500ms 驱动一次，开关的 command 也会直接触发。
+        区域没变时直接返回——反复销毁重建会让边框闪，而创建 Toplevel 并不便宜。
+        这也让"创建失败"天然不再重试：失败时同样记下区域，避免每 500ms 撞一次。
+        """
+        want = None
+        if self._rc_region_running and self._rc_outline_var.get():
+            want = self._current_region()
+
+        if want is None:
+            self._destroy_region_outline()
+            return
+        if want == self._rc_outline_region:
+            return
+
+        self._destroy_region_outline()
+        self._rc_outline_region = want
+        try:
+            self._rc_outline = RegionOutline(self.root, want)
+            return
+        except RegionOutlineUnavailable:
+            msg = "⚠ 当前环境无法显示区域边框（覆盖层做不到点击穿透），已跳过"
+        except Exception as e:
+            msg = f"⚠ 区域边框显示失败: {e}"
+        # 覆盖层做不到穿透时宁可不显示：一个会吃点击的窗口会让区域连点整个失效，
+        # 那比没有边框严重得多。只提示一次，之后同一区域不再重试。
+        self._rc_outline = None
+        if not self._rc_outline_unavailable:
+            self._rc_outline_unavailable = True
+            push_toast(msg, duration=5.0)
+
+    def _destroy_region_outline(self):
+        """销毁常驻边框（若存在）。"""
+        outline, self._rc_outline = self._rc_outline, None
+        self._rc_outline_region = None
+        if outline is not None:
+            try:
+                outline.destroy()
+            except Exception:
+                pass
+
     def _refresh_region_presets(self, select: str = ""):
         """刷新预设下拉框（保留当前选中项）。"""
         try:
@@ -2317,6 +2372,11 @@ class _DesktopWindow:
             script_paused = bool(status.get("script_paused"))
             playback_active = bool(status.get("playback_active"))
             busy = region_active or script_running or playback_active
+
+            # 常驻边框跟着运行状态走。每拍都调，_sync_region_outline() 在区域
+            # 未变时会立刻返回；这样运行中途改了 X/Y/宽/高 也能重新画框。
+            self._rc_region_running = region_active
+            self._sync_region_outline()
 
             self.btn_rc_start.configure(state="disabled" if busy else "normal")
             for widget in self._rc_capture_widgets:

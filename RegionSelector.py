@@ -397,3 +397,181 @@ class RegionSelector:
             pass
         self.logger.info("窗口拾取已启动：%.1f 秒倒计时", delay)
         tick()
+
+
+# ---- 运行时常驻边框 ----------------------------------------------------------
+
+# 边框线宽，以及边框到区域外沿的留白（像素）。
+OUTLINE_BORDER = 2
+OUTLINE_MARGIN = 2
+
+# -transparentcolor 的颜色键。该颜色的像素完全透明且不参与鼠标命中测试。
+# 选一个不会与边框配色重合的值。
+OUTLINE_COLORKEY = "#ff00fe"
+
+# 独立的 user32 实例：ctypes.windll.user32 是进程内共享对象，
+# 在它上面设 argtypes 会波及其它模块，所以这里另开一个。
+_user32_ex = ctypes.WinDLL("user32")
+_user32_ex.GetParent.restype = ctypes.c_void_p
+_user32_ex.GetParent.argtypes = [ctypes.c_void_p]
+_user32_ex.GetWindowLongW.restype = ctypes.c_long
+_user32_ex.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_user32_ex.SetWindowLongW.restype = ctypes.c_long
+_user32_ex.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
+
+
+def outline_geometry(region: dict, border: int = OUTLINE_BORDER,
+                     margin: int = OUTLINE_MARGIN
+                     ) -> Optional[tuple[int, int, int, int]]:
+    """算出边框窗口的 ``(宽, 高, x, y)``；区域尺寸非法时返回 ``None``。
+
+    窗口比区域每边大 ``border + margin`` 像素，矩形画在这圈留白里，
+    于是边框**完全落在区域外侧**——覆盖层没有任何不透明像素压在可点击区域上。
+    """
+    try:
+        x = int(region["x"])
+        y = int(region["y"])
+        w = int(region["width"])
+        h = int(region["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    pad = border + margin
+    return (w + pad * 2, h + pad * 2, x - pad, y - pad)
+
+
+class RegionOutlineUnavailable(RuntimeError):
+    """覆盖层无法做到点击穿透，调用方应放弃显示而不是降级显示。"""
+
+
+class RegionOutline:
+    """区域连点运行期间常驻显示的边框覆盖层（点击穿透）。
+
+    **为什么必须穿透**：区域连点靠 Interception 注入相对位移，注入的点击会落到
+    光标下最上层的窗口。覆盖层一旦接收鼠标事件，落在区域内的点击就全被它吃掉，
+    功能直接失效——不是"稍微挡一下"，是完全点不到游戏。
+
+    三层保障，按可靠性递减：
+
+      1. 边框画在区域**外侧**（见 :func:`outline_geometry`）。即使下面两层全失败，
+         区域内的像素也永远不会被不透明像素覆盖。
+      2. Tk 的 ``-transparentcolor``：颜色键像素完全透明且不参与命中测试。
+         这一层不依赖任何 Win32 调用，是穿透的主要保障。
+      3. ``WS_EX_LAYERED | WS_EX_TRANSPARENT``：让边框线本身也穿透。
+         对 overrideredirect 窗口拿 HWND 并不可靠（``wm_frame()`` 常返回 ``0x0``），
+         所以这一步是尽力而为；失败只影响边框那 2 像素。
+
+    **失败安全**：若第 2、3 层都拿不到（窗口会整个吃掉点击），构造函数销毁窗口并
+    抛 :class:`RegionOutlineUnavailable`，调用方据此跳过覆盖层。宁可什么都不显示，
+    也绝不放一个会吞点击的窗口上去。
+
+    必须在 Tk 主线程创建与销毁（子线程建 Tk 窗口会崩溃，见模块 docstring）。
+    """
+
+    COLOR = "#22d3ee"
+
+    def __init__(self, root: tk.Misc, region: dict,
+                 border: int = OUTLINE_BORDER):
+        geom = outline_geometry(region, border=border)
+        if geom is None:
+            raise ValueError(f"非法区域，无法绘制边框: {region!r}")
+        width, height, x, y = geom
+        self.region = dict(region)
+        self.logger = logging.getLogger("region_outline")
+        pad = border + OUTLINE_MARGIN
+
+        self.win = tk.Toplevel(root)
+        self.win.overrideredirect(True)
+        self.win.configure(bg=OUTLINE_COLORKEY)
+        self.win.geometry(f"{width}x{height}+{x}+{y}")
+        try:
+            self.win.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+
+        colorkey_ok = self._set_colorkey()
+        transparent_ok = self._set_click_through()
+        if not colorkey_ok and not transparent_ok:
+            self.destroy()
+            raise RegionOutlineUnavailable(
+                "无法让覆盖层点击穿透（-transparentcolor 与 WS_EX_TRANSPARENT 均失败）")
+
+        self.canvas = tk.Canvas(self.win, bg=OUTLINE_COLORKEY,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self._draw(pad, border)
+
+        if not transparent_ok:
+            self.logger.warning(
+                "边框未能设为 WS_EX_TRANSPARENT，边框线上的点击会被覆盖层吃掉"
+                "（区域内部不受影响）")
+
+    # ---- 内部 ----
+
+    def _draw(self, pad: int, border: int) -> None:
+        """画出区域边框。Tk 的线宽居中于路径，所以路径取 ``pad - border/2``，
+        线条正好落在区域外侧，不压住任何可点击像素。"""
+        w = int(self.region["width"])
+        h = int(self.region["height"])
+        half = border / 2.0
+        self.canvas.create_rectangle(pad - half, pad - half,
+                                     pad + w + half, pad + h + half,
+                                     outline=self.COLOR, width=border)
+
+    def _set_colorkey(self) -> bool:
+        try:
+            self.win.attributes("-transparentcolor", OUTLINE_COLORKEY)
+            return True
+        except tk.TclError:
+            self.logger.warning("当前 Tk 不支持 -transparentcolor")
+            return False
+
+    def _hwnd(self) -> int:
+        """尽力拿到顶层窗口 HWND；三种途径依次尝试，全失败返回 0。"""
+        try:
+            self.win.update_idletasks()
+        except Exception:
+            pass
+        try:
+            frame = int(self.win.wm_frame(), 16)
+            if frame:
+                return frame
+        except Exception:
+            pass
+        try:
+            parent = int(_user32_ex.GetParent(int(self.win.winfo_id())) or 0)
+            if parent:
+                return parent
+        except Exception:
+            pass
+        try:
+            return int(self.win.winfo_id())
+        except Exception:
+            return 0
+
+    def _set_click_through(self) -> bool:
+        hwnd = self._hwnd()
+        if not hwnd:
+            self.logger.warning("拿不到覆盖层 HWND，跳过 WS_EX_TRANSPARENT")
+            return False
+        try:
+            style = _user32_ex.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            _user32_ex.SetWindowLongW(
+                hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+            return True
+        except Exception as e:
+            self.logger.warning("设置 WS_EX_TRANSPARENT 失败: %s", e)
+            return False
+
+    # ---- 对外 ----
+
+    def destroy(self) -> None:
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
