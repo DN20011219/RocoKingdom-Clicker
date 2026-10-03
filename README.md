@@ -80,6 +80,7 @@ python -m unittest discover -s tests -v
 给定一套「音 → 键盘按键」的绑定，把任意 MIDI 曲谱按原速自动弹出来：
 
 - **曲谱库**：把 `.mid` / `.midi` 放进 `data/music/`，或在面板里点 `📂 导入 MIDI`（复制进来，重名自动加序号）。程序启动即自动列出，选中即自动检查。
+- **曲谱从哪来**：推荐 [RocoMusic（洛克乐谱）](https://rocomusic.cn/)——面向《洛克王国》玩家的非官方 MIDI 曲谱社区，另有「求谱广场」与「手碟转谱」。本项目默认键位就是《洛克王国：世界》手碟九键，那边的谱子基本可以直接演奏，不必自己重排键位。发布包附带 6 首来自该站的示例曲谱（清单与版权说明见 [data/music/README.md](data/music/README.md)），版权归原作者与转录者所有。
 - **能不能演奏，先说清楚**：曲谱里出现的每个音都必须在键位表里有按键，才允许开演。缺音时面板会逐条列出「哪个音、出现几次、首次在第几秒、最接近的已绑定音是哪个、差几个半音」，`▶` 按钮变成 `⚠ 无法演奏 · 查看原因`，点下去弹出完整清单——不会静默跳过几个音就开演。
 - **移调**：音域不合时可以用「移调」整体平移；勾上「自动移调」后，若原调演奏不了，会自动挑一个**能覆盖全部音符且移调量最小**的方案。半音阶这类谱子没有任何移调量能救，面板会直接说明。
 - **键位可改**：默认是《洛克王国：世界》手碟九键（`A2→B`、`E3→F`、`F3→G`、`G3→H`、`A3→J`、`B3→K`、`C4→T`、`D4→Y`、`E4→U`，中央 C = 60 = C4）。`✏ 编辑键位` 可以改按键、删绑定、按音名（`C#4` / `Db4`）或 MIDI 音高数字新增绑定；保存时校验按键合法性与一键多音冲突。
@@ -280,8 +281,9 @@ python -m unittest discover -s tests -v
 - 修改热键后按钮 label 会自动更新（如 `⏸ 暂停 (F3)`）；若未更新，点击"保存热键设置"按钮触发刷新。
 
 ## 更新日志与贡献
-- 最新变更记录请见：[docs/changelog/2026-10-01.md](docs/changelog/2026-10-01.md)
-- 历史变更：[docs/changelog/2026-09-30.md](docs/changelog/2026-09-30.md) | [docs/changelog/2026-09-28.md](docs/changelog/2026-09-28.md) | [docs/changelog/2026-09-27.md](docs/changelog/2026-09-27.md) | [docs/changelog/2026-07-20.md](docs/changelog/2026-07-20.md) | [docs/changelog/2026-06-29.md](docs/changelog/2026-06-29.md) | [docs/changelog/2026-06-21.md](docs/changelog/2026-06-21.md)
+- **发布说明**（按版本聚合，可直接作为 GitHub Release 正文）：[docs/releases/v1.7.md](docs/releases/v1.7.md)
+- 最新变更记录请见：[docs/changelog/2026-10-03.md](docs/changelog/2026-10-03.md)
+- 历史变更：[2026-10-01](docs/changelog/2026-10-01.md) | [2026-09-30](docs/changelog/2026-09-30.md) | [2026-09-28](docs/changelog/2026-09-28.md) | [2026-09-27](docs/changelog/2026-09-27.md) | [2026-08-01](docs/changelog/2026-08-01.md) | [2026-07-20](docs/changelog/2026-07-20.md) | [2026-06-29](docs/changelog/2026-06-29.md) | [2026-06-21](docs/changelog/2026-06-21.md) | [2026-05-31](docs/changelog/2026-05-31.md)
 - 欢迎提交 issue 或 PR，描述你的使用场景与复现步骤。
 
 ---
@@ -324,6 +326,10 @@ python -m unittest discover -s tests -v
 - [mouse-ai](https://github.com/SaluRamos/mouse-ai) — DMTG 扩散模型鼠标轨迹 (Python)
 - [SigmaDrift](https://github.com/ck0i/SigmaDrift) — 生物力学鼠标轨迹生成 (C++20)
 - [WindMouse](https://ben.land/post/2021/04/25/windmouse-human-mouse-movement/) — 物理模拟拟人鼠标移动 (GPLv3)
+
+曲谱资源：
+
+- [RocoMusic（洛克乐谱）](https://rocomusic.cn/) — 面向《洛克王国》玩家的非官方 MIDI 曲谱社区；`data/music/` 附带的示例曲谱来自该站，版权归原作者与转录者所有
 
 ## 许可协议 (Licensing)
 
