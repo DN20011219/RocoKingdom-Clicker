@@ -21,10 +21,11 @@
       "y_jitter_px": 3,
       "spot_pause_ms": 0,
       "spot_pause_jitter_ms": 0,
-      "path_strategy": "global",
+      "path_strategy": "sine",
       "path_steps": 0,
       "button": "left",
-      "correct_drift_px": 4
+      "correct_drift_px": 0,
+      "path_params": { "sine_amplitude_px": 3.0, "sine_frequency": 1 }
     }
   ]
 }

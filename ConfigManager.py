@@ -91,13 +91,18 @@ DEFAULT_REGION_CLICK = {
     "y_jitter_px": 3,
     "spot_pause_ms": 0,             # 换点后的额外停顿
     "spot_pause_jitter_ms": 0,
-    "path_strategy": "global",      # global / sine / fitts / neuromotor / straight
+    "path_strategy": "sine",        # global / sine / fitts / neuromotor / straight
     "path_steps": 0,                # 0 = 按移动耗时自动推算
     "button": "left",               # left / right / middle
-    "correct_drift_px": 4,          # 0 = 关闭漂移校正
-    # 覆盖全局拟人路径参数（与 RegionClickAction.path_params 对应），
-    # 例如 {"fitts_arc_px": 20.0}；面板不编辑它，可手改本文件生效
-    "path_params": {},
+    "correct_drift_px": 0,          # 0 = 关闭漂移校正
+    # 覆盖全局拟人路径参数（与 RegionClickAction.path_params 对应）。
+    # 区域连点的默认值刻意比第三栏（回放/录制）温和：换点距离通常只有几十像素
+    # （受 min_spot_distance_px 约束），而 PathPlanner 的 sine 振幅是**固定像素、
+    # 不按距离缩放**的——全局默认 10px 振幅 + 2~4 个周期叠在 40px 的短程移动上，
+    # 观感就是鼠标在乱跑。这里压到 3px / 1 个基准周期。
+    # 策略也不再默认 "global"（= 跟随第三栏，而第三栏默认 fitts：带 2px 高斯微抖
+    # 和 30% 概率的 4.5~15px 过冲再拉回，短程上同样很跳）。
+    "path_params": {"sine_amplitude_px": 3.0, "sine_frequency": 1},
 }
 
 # 区域连点的路径策略合法取值

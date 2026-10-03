@@ -231,13 +231,17 @@
 | `x_jitter_px` / `y_jitter_px` | `3` / `3` | 单次点击的落点抖动 |
 | `spot_pause_ms` | `0` | 换点之后的额外停顿 |
 | `spot_pause_jitter_ms` | `0` | 换点停顿的 ± 扰动 |
-| `path_strategy` | `global` | `global`（跟随 GUI 第三栏配置）/ `sine` / `fitts` / `neuromotor` / `straight` |
+| `path_strategy` | `sine` | `global`（跟随 GUI 第三栏配置）/ `sine` / `fitts` / `neuromotor` / `straight` |
 | `path_steps` | `0` | 路径采样步数，`0` = 按移动耗时自动推算 |
 | `button` | `left` | `left` / `right` / `middle` |
-| `correct_drift_px` | `4` | 漂移校正阈值，实际光标与目标点误差超过它就补一次相对移动；`0` = 关闭 |
-| `path_params` | `{}` | 覆盖路径算法参数，键名同 `data/clicker_configs/path_planner.json` |
+| `correct_drift_px` | `0` | 漂移校正阈值，实际光标与目标点误差超过它就补一段移动（分多步插值，不是单次甩过去）；`0` = 关闭 |
+| `path_params` | `{"sine_amplitude_px": 3.0, "sine_frequency": 1}` | 覆盖路径算法参数，键名同 `data/clicker_configs/path_planner.json` |
 
 `path_strategy` 为 `global` 时使用 `path_planner.json` 里保存的策略与参数（振幅、弧线、过冲、神经运动噪声等）；`path_params` 可以只覆盖其中几个键。
+
+**为什么区域连点的默认比第三栏温和**：换点距离受 `min_spot_distance_px` 约束，通常只有几十像素，而 `PathPlanner` 的 sine 振幅是**固定像素、不按距离缩放**的。全局默认的 10px 振幅 + 2~4 个周期叠在 40px 的短程移动上，观感就是鼠标在乱跑；`fitts` 还带 2px 高斯微抖和 30% 概率的 4.5~15px 过冲再拉回。所以这里默认 `sine` 且把振幅压到 3px。想要更强的拟人扰动，把 `path_strategy` 改成 `global` 或 `fitts` 即可。
+
+`correct_drift_px` 默认关闭是因为每段移动结束后都会**读回真实光标位置**作为下一段的起点，误差不跨段累积，不再需要事后校正。只在"运行中途手动把鼠标拖走"这类场景下才需要打开。
 
 #### 最小示例
 
@@ -248,15 +252,15 @@
   "forever": true,
   "clicks_per_spot": 3,
   "interval_ms": 120,
-  "move_duration_ms": 220,
-  "path_strategy": "fitts"
+  "move_duration_ms": 220
 }
 ```
 
 #### 行为要点
 
 - 启动时先读取当前光标位置，用与后续相同的相对轨迹移动到区域内第一个随机点，不做瞬移。
-- 每个点的落点抖动通过“微移 → 按下 → 抬起 → 反向补偿”实现，多次点击的抖动彼此独立，但基准点不会随机游走。
+- **落点抖动只出去、不回来**：按下前偏移 ±jitter，抬起后不再反向补偿。基准确实会游走几个像素，但下一段移动的位移量是从实际光标位置算的，游走不会累积。早期版本的"反向补偿"会让每次点击后鼠标弹回原位，`clicks_per_spot=3` 时一个点来回 6 趟，看着像在原地抽，已移除。
+- **每段移动后读回真实光标位置**（`GetCursorPos`）作为下一段位移的起点。注入丢 stroke、用户手动挪鼠标、系统把光标夹到屏幕边缘，都不会让误差一段段累加。
 - `F2` 暂停 / 继续与停止按钮全程生效（换点、点击间隔、移动过程都可中断）。
 - 完整示例见同目录的 `region_click.json`。
 

@@ -319,11 +319,19 @@ class RegionClickAction:
     y_jitter_px: int = 3
     spot_pause_ms: int = 0          # 换点后的额外停顿
     spot_pause_jitter_ms: int = 0
-    path_strategy: str = "global"   # global / sine / fitts / neuromotor / straight
+    # 下面四项必须与 ConfigManager.DEFAULT_REGION_CLICK 保持一致：面板走后者，
+    # 手写脚本经 _parse_region_click 走这里（它取 RegionClickAction() 当默认值）。
+    # 两边不同步的话，脚本里省略字段就会悄悄退回旧的抖动行为。
+    path_strategy: str = "sine"     # global / sine / fitts / neuromotor / straight
     path_steps: int = 0             # 0 = 按移动耗时自动推算
     button: str = "left"            # left / right / middle
-    correct_drift_px: int = 4       # 0 = 关闭漂移校正
-    path_params: dict = field(default_factory=dict)  # 可覆盖全局扰动参数
+    correct_drift_px: int = 0       # 0 = 关闭漂移校正（每段移动后都读回真实光标位置）
+    # 区域连点的换点距离通常只有几十像素，而 PathPlanner 的 sine 振幅是固定像素、
+    # 不按距离缩放，全局默认的 10px 振幅叠在短程移动上观感就是乱跑。理由详见
+    # ConfigManager.DEFAULT_REGION_CLICK 的同名注释。
+    path_params: dict = field(default_factory=lambda: {
+        "sine_amplitude_px": 3.0, "sine_frequency": 1,
+    })
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -732,6 +740,35 @@ class ActionExecutor:
             self.logger.debug("GetCursorPos 失败: %s", e)
         return 0, 0
 
+    def _read_cursor_or_none(self) -> Optional[tuple[int, int]]:
+        """同 _get_cursor_pos，但用 None 表示读取失败。
+
+        _get_cursor_pos 拿 (0,0) 当失败哨兵，而 (0,0) 同时是虚拟屏原点的合法坐标，
+        两者无法区分。区域连点要靠读回的位置算下一段位移，判错一次就会甩出一个
+        巨大的位移量，所以这里单独给一个无歧义的版本。
+        """
+        point = POINT()
+        try:
+            if user32.GetCursorPos(ctypes.byref(point)):
+                return int(point.x), int(point.y)
+        except Exception as e:
+            self.logger.debug("GetCursorPos 失败: %s", e)
+        return None
+
+    def _read_cursor(self, fallback: tuple[int, int]) -> tuple[int, int]:
+        """读回实际光标位置作为下一段相对位移的起点；读不到就用 fallback。
+
+        区域连点全程只发相对位移，"鼠标在哪"理论上等于累加的位移量。但注入可能
+        丢 stroke、用户可能手动挪鼠标、系统可能把光标夹到屏幕边缘，理论值会偏。
+        每段移动后读一次真实位置，误差就不会跨段累积——这正是可以不再依赖瞬移
+        校正的原因。
+
+        fallback 传本段的目标点：读失败就当已经到位（本段不再移动），比拿 (0,0)
+        去算位移安全得多。
+        """
+        pos = self._read_cursor_or_none()
+        return pos if pos is not None else (int(fallback[0]), int(fallback[1]))
+
     def _planner_kwargs(self, overrides: Optional[dict] = None) -> dict:
         """过滤出 PathPlanner 认识的扰动参数（动作自带参数可覆盖全局）。"""
         merged = dict(self.path_planner_params or {})
@@ -855,27 +892,48 @@ class ActionExecutor:
         return candidate
 
     def _correct_drift(self, target_x: int, target_y: int, threshold: int) -> None:
-        """对比实际光标位置与目标点，超阈值时补发一个小的相对位移。"""
+        """偏差超阈值时补一段移动，分多步发而不是单 stroke 甩过去。
+
+        单 stroke 的大位移在用户眼里就是瞬移，是"鼠标乱跳"的观感来源之一。
+        默认关闭（``correct_drift_px=0``）：每段移动后都会读回真实光标位置当作
+        下一段的起点（见 :meth:`_read_cursor`），误差不跨段累积，这个校正多数时候
+        是多余的。留着是为了对付"运行中途用户把鼠标拖走"这种情况。
+        """
         if threshold <= 0:
             return
-        cursor_x, cursor_y = self._get_cursor_pos()
-        if cursor_x == 0 and cursor_y == 0:
+        pos = self._read_cursor_or_none()
+        if pos is None:
             return
+        cursor_x, cursor_y = pos
         dx = int(target_x) - cursor_x
         dy = int(target_y) - cursor_y
         if abs(dx) <= threshold and abs(dy) <= threshold:
             return
         self.logger.debug("漂移校正: (%d,%d) -> (%d,%d)", cursor_x, cursor_y, target_x, target_y)
-        self._send_relative_move(dx, dy)
+        # 约每 8px 一步，夹在 2~12 步；末步吃掉累计舍入误差
+        steps = max(2, min(12, int(math.hypot(dx, dy) // 8)))
+        prev_ix = prev_iy = 0
+        for i in range(1, steps + 1):
+            frac = i / steps
+            ix = int(round(dx * frac))
+            iy = int(round(dy * frac))
+            self._send_relative_move(ix - prev_ix, iy - prev_iy)
+            prev_ix, prev_iy = ix, iy
 
     def _click_at_spot(self, spot: tuple[int, int], action: RegionClickAction,
                        down_state: int, up_state: int,
                        stop_event: Optional[threading.Event],
                        pause_event: Optional[threading.Event]) -> bool:
-        """在 spot 上执行一次点击。
+        """在当前位置执行一次点击。
 
-        落点抖动用"微移 + 反向补偿"：按下前偏移 ±jitter，抬起后反向补回，
-        这样 spot 基准不会随点击次数随机游走，而每次落点仍然独立随机。
+        落点抖动**只出去、不回来**。早期版本是"微移 + 反向补偿"：按下前偏移
+        ±jitter，抬起后反向补回，为的是让 spot 基准不随点击次数游走。但那个"补回"
+        在用户眼里就是每点一次鼠标弹回去一次——clicks_per_spot=3 时一个点来回 6 趟，
+        看着像在原地抽。
+
+        现在不补偿了：基准确实会游走几个像素，但下一段移动的位移量是从**实际光标
+        位置**读回来算的（见 :meth:`_read_cursor`），游走不会跨段累积，也就不需要
+        补回来。落点随机性一点没少，来回跳没了。
         """
         jx = random.randint(-action.x_jitter_px, action.x_jitter_px) if action.x_jitter_px > 0 else 0
         jy = random.randint(-action.y_jitter_px, action.y_jitter_px) if action.y_jitter_px > 0 else 0
@@ -886,12 +944,7 @@ class ActionExecutor:
         hold_ms = self._apply_jitter(action.hold_ms, action.hold_jitter_ms, minimum=1)
         interrupted = not self._sleep_with_controls(hold_ms / 1000.0, stop_event, pause_event)
         self._send_button(up_state)
-        if interrupted:
-            return False
-
-        if jx or jy:
-            self._send_relative_move(-jx, -jy)
-        return True
+        return not interrupted
 
     def _execute_region_click(self, action: RegionClickAction,
                               stop_event: Optional[threading.Event],
@@ -940,16 +993,17 @@ class ActionExecutor:
             self.region_click_spots += 1
 
             # 首点进入：从当前光标位置相对移动过去（不做绝对跳转）
-            cursor_x, cursor_y = self._get_cursor_pos()
+            current = self._read_cursor(spot)
             first_duration = self._apply_jitter(
                 action.move_duration_ms, action.move_duration_jitter_ms, minimum=1)
             if not self._send_relative_moves(
-                self._plan_relative_move(spot[0] - cursor_x, spot[1] - cursor_y,
+                self._plan_relative_move(spot[0] - current[0], spot[1] - current[1],
                                          first_duration, action),
                 stop_event, pause_event,
             ):
                 return False
             self._correct_drift(spot[0], spot[1], action.correct_drift_px)
+            current = self._read_cursor(spot)
 
             while True:
                 if stop_event and stop_event.is_set():
@@ -975,12 +1029,15 @@ class ActionExecutor:
                                 interval / 1000.0, stop_event, pause_event):
                             return False
 
-                # 换点：拟人轨迹移动到下一个随机点
-                next_spot = self._pick_spot(bounds, spot, action.min_spot_distance_px)
+                # 换点：拟人轨迹移动到下一个随机点。位移量从**实际光标位置**算，
+                # 不是从上一个目标点算——落点抖动、丢 stroke、用户手动挪鼠标都会让
+                # 两者不一致，按理论值算误差就会一段段累积下去。
+                next_spot = self._pick_spot(bounds, current, action.min_spot_distance_px)
                 duration = self._apply_jitter(
                     action.move_duration_ms, action.move_duration_jitter_ms, minimum=1)
                 if not self._send_relative_moves(
-                    self._plan_relative_move(next_spot[0] - spot[0], next_spot[1] - spot[1],
+                    self._plan_relative_move(next_spot[0] - current[0],
+                                             next_spot[1] - current[1],
                                              duration, action),
                     stop_event, pause_event,
                 ):
@@ -988,6 +1045,7 @@ class ActionExecutor:
                 spot = next_spot
                 self.region_click_spots += 1
                 self._correct_drift(spot[0], spot[1], action.correct_drift_px)
+                current = self._read_cursor(spot)
 
                 if action.spot_pause_ms > 0:
                     pause_ms = self._apply_jitter(
@@ -1275,9 +1333,11 @@ class ActionScriptManager:
             return None
 
         defaults = RegionClickAction()
-        path_params = item.get("path_params") or {}
-        if not isinstance(path_params, dict):
-            path_params = {}
+        # 省略或写坏 path_params 时回落到数据类默认（区域连点的温和 sine 参数），
+        # 而不是空 dict——空 dict 会让 PathPlanner 用全局的 10px 振幅，短程移动很跳。
+        path_params = item.get("path_params")
+        if not isinstance(path_params, dict) or not path_params:
+            path_params = dict(defaults.path_params)
         action = RegionClickAction(
             region_x=rx, region_y=ry, region_width=rw, region_height=rh,
             clicks=int(item.get("clicks", defaults.clicks)),
